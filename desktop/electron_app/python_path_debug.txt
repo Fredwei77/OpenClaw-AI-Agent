@@ -1,0 +1,3 @@
+Resolved Python Executable: C:\Users\user\Desktop\OpenClaw AI Agent\.venv\Scripts\python.exe
+__dirname: C:\Users\user\Desktop\OpenClaw AI Agent\desktop\electron_app
+cwd: C:\Users\user\Desktop\OpenClaw AI Agent\desktop\electron_app

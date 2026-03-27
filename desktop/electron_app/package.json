@@ -1,0 +1,48 @@
+{
+  "name": "openclaw-ai-agent",
+  "version": "1.0.0",
+  "description": "OpenClaw AI Cross-Border Agent",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "author": "OpenClaw",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.openclaw.agent",
+    "productName": "OpenClaw AI",
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "main.js",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../frontend/dist",
+        "to": "www"
+      },
+      {
+        "from": "../../backend",
+        "to": "backend"
+      },
+      {
+        "from": "../../agents",
+        "to": "agents"
+      },
+      {
+        "from": "../../browser_cluster",
+        "to": "browser_cluster"
+      },
+      {
+        "from": "../../.env",
+        "to": ".env"
+      }
+    ]
+  }
+}
