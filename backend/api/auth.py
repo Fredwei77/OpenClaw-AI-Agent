@@ -5,7 +5,7 @@ from typing import Optional, Literal
 from datetime import datetime, timedelta
 import asyncpg
 import bcrypt
-import jwt
+from jose import jwt, JWTError
 import os
 from dotenv import load_dotenv
 
@@ -78,10 +78,10 @@ def decode_token(token: str) -> TokenData:
     """Decode and validate a JWT token."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id: int = payload.get("sub")
-        if user_id is None:
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
             raise HTTPException(status_code=401, detail="Invalid token")
-        return TokenData(user_id=user_id)
+        return TokenData(user_id=int(user_id_str))
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.JWTError:
@@ -176,7 +176,7 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        access_token = create_access_token(data={"sub": row['id'], "email": row['email']})
+        access_token = create_access_token(data={"sub": str(row['id']), "email": row['email']})
         return Token(access_token=access_token)
 
 
@@ -189,7 +189,7 @@ async def get_me(current_user: UserResponse = Depends(get_current_user)):
 @router.post("/refresh", response_model=Token)
 async def refresh_token(current_user: UserResponse = Depends(get_current_user)):
     """Refresh the access token."""
-    access_token = create_access_token(data={"sub": current_user.id, "email": current_user.email})
+    access_token = create_access_token(data={"sub": str(current_user.id), "email": current_user.email})
     return Token(access_token=access_token)
 
 

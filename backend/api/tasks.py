@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Literal, List
 from datetime import datetime
 import asyncpg
+import json
 import os
 from .auth import get_db_pool, get_current_user, UserResponse
 
@@ -103,12 +104,17 @@ async def get_tasks(
 
             rows = await conn.fetch(query, *params)
 
+            def parse_payload(p):
+                if isinstance(p, str):
+                    return json.loads(p)
+                return p or {}
+
             tasks = [
                 TaskResponse(
                     id=row['id'],
                     agent_name=row['agent_name'],
                     task_type=row['task_type'],
-                    payload=row['payload'] or {},
+                    payload=parse_payload(row['payload']),
                     status=row['status'],
                     created_at=row['created_at'],
                     user_id=row['user_id']
@@ -150,7 +156,7 @@ async def get_task(
                 id=row['id'],
                 agent_name=row['agent_name'],
                 task_type=row['task_type'],
-                payload=row['payload'] or {},
+                payload=parse_payload(row['payload']),
                 status=row['status'],
                 created_at=row['created_at'],
                 user_id=row['user_id']
@@ -174,13 +180,19 @@ async def create_task(
                 """INSERT INTO tasks (agent_name, task_type, payload, status, user_id)
                    VALUES ($1, $2, $3, 'pending', $4)
                    RETURNING id, agent_name, task_type, payload, status, created_at, user_id""",
-                task.agent_name, task.task_type, task.payload, current_user.id
+                task.agent_name, task.task_type, json.dumps(task.payload), current_user.id
             )
+
+            def parse_payload(p):
+                if isinstance(p, str):
+                    return json.loads(p)
+                return p or {}
+
             return TaskResponse(
                 id=row['id'],
                 agent_name=row['agent_name'],
                 task_type=row['task_type'],
-                payload=row['payload'] or {},
+                payload=parse_payload(row['payload']),
                 status=row['status'],
                 created_at=row['created_at'],
                 user_id=row['user_id']
@@ -223,7 +235,7 @@ async def update_task(
 
             if update.payload is not None:
                 updates.append(f"payload = ${param_idx}")
-                params.append(update.payload)
+                params.append(json.dumps(update.payload))
                 param_idx += 1
 
             if not updates:
@@ -236,12 +248,17 @@ async def update_task(
                 RETURNING id, agent_name, task_type, payload, status, created_at, user_id
             """
 
+            def parse_payload(p):
+                if isinstance(p, str):
+                    return json.loads(p)
+                return p or {}
+
             row = await conn.fetchrow(query, *params)
             return TaskResponse(
                 id=row['id'],
                 agent_name=row['agent_name'],
                 task_type=row['task_type'],
-                payload=row['payload'] or {},
+                payload=parse_payload(row['payload']),
                 status=row['status'],
                 created_at=row['created_at'],
                 user_id=row['user_id']
