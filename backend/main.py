@@ -16,10 +16,14 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from api import auth, agents, tasks, leads, products, analytics
+from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
 
 app = FastAPI(title="OpenClaw AI Agent API", version="1.0.0", description="Backend API for Cross-Border Ecommerce Agents")
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # Dev only - allow all
@@ -28,6 +32,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add global response middleware
+app.add_middleware(GlobalResponseMiddleware)
+
+# Register exception handlers
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(ValidationError, validation_exception_handler)
+app.add_exception_handler(Exception, generic_exception_handler)
+
+# Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])

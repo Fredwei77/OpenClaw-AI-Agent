@@ -32,12 +32,14 @@ CREATE TABLE IF NOT EXISTS proxies (
 
 CREATE TABLE IF NOT EXISTS leads (
     id SERIAL PRIMARY KEY,
+    user_id INT,
     platform VARCHAR(50),
     username VARCHAR(255),
     profile_url TEXT,
     email VARCHAR(255),
     followers INT,
     tags TEXT[],
+    status VARCHAR(50) DEFAULT 'new',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -61,6 +63,7 @@ CREATE TABLE IF NOT EXISTS comments (
 
 CREATE TABLE IF NOT EXISTS stores (
     id SERIAL PRIMARY KEY,
+    user_id INT,
     platform VARCHAR(50),
     store_url TEXT,
     category VARCHAR(255),
@@ -69,6 +72,7 @@ CREATE TABLE IF NOT EXISTS stores (
 
 CREATE TABLE IF NOT EXISTS products (
     id SERIAL PRIMARY KEY,
+    user_id INT,
     store_id INT,
     product_name TEXT,
     price NUMERIC,
@@ -87,6 +91,7 @@ CREATE TABLE IF NOT EXISTS ads (
 
 CREATE TABLE IF NOT EXISTS tasks (
     id SERIAL PRIMARY KEY,
+    user_id INT,
     agent_name VARCHAR(255),
     task_type VARCHAR(255),
     payload JSONB,
