@@ -96,5 +96,37 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_type VARCHAR(255),
     payload JSONB,
     status VARCHAR(50),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    result JSONB,
+    error TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    started_at TIMESTAMP,
+    completed_at TIMESTAMP
 );
+
+-- =====================================================
+-- INDEXES - Performance optimization for production
+-- =====================================================
+
+-- Leads table indexes
+CREATE INDEX IF NOT EXISTS idx_leads_user_status ON leads(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_leads_user_platform ON leads(user_id, platform);
+CREATE INDEX IF NOT EXISTS idx_leads_platform_username ON leads(platform, username);
+CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at DESC);
+
+-- Tasks table indexes
+CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+
+-- Messages table indexes
+CREATE INDEX IF NOT EXISTS idx_messages_lead_id ON messages(lead_id);
+CREATE INDEX IF NOT EXISTS idx_messages_account_id ON messages(account_id);
+CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status);
+
+-- Accounts table indexes
+CREATE INDEX IF NOT EXISTS idx_accounts_platform_status ON accounts(platform, status);
+CREATE INDEX IF NOT EXISTS idx_accounts_risk_score ON accounts(risk_score);
+
+-- Products table indexes
+CREATE INDEX IF NOT EXISTS idx_products_user_id ON products(user_id);
+CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);

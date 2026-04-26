@@ -13,10 +13,18 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', '.env'))
 
 router = APIRouter()
 
-# JWT Configuration - MUST be set in environment
+# JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
-    raise ValueError("JWT_SECRET_KEY environment variable must be set")
+    import secrets
+    import warnings
+    warnings.warn(
+        "JWT_SECRET_KEY not set! Using a random key for development only. "
+        "Set JWT_SECRET_KEY in environment for production.",
+        UserWarning
+    )
+    # Generate a random key for development (sessions will be invalid after restart)
+    SECRET_KEY = secrets.token_urlsafe(32)
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30

@@ -1,0 +1,51 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@context7/mcp-server"],
+      "env": {}
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": {
+          "env": "GITHUB_TOKEN"
+        }
+      }
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres"],
+      "env": {
+        "DATABASE_URL": {
+          "env": "DATABASE_URL"
+        }
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-playwright"],
+      "env": {}
+    },
+    "slack": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-slack"],
+      "env": {
+        "SLACK_BOT_TOKEN": {
+          "env": "SLACK_BOT_TOKEN"
+        },
+        "SLACK_TEAM_ID": {
+          "env": "SLACK_TEAM_ID"
+        }
+      }
+    }
+  },
+  "comments": {
+    "postgres": "用于直接查询 PostgreSQL 数据库",
+    "playwright": "浏览器自动化测试",
+    "slack": "团队通知和消息推送",
+    "context7": "获取最新库文档（FastAPI, React, Playwright 等）",
+    "github": "GitHub Issues 和 Pull Requests 管理"
+  }
+}

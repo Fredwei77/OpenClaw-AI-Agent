@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key } from 'lucide-react';
+import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 // Use environment variable for backend URL if available, default to localhost:8000
@@ -183,16 +183,39 @@ function App() {
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [webhookSuccess, setWebhookSuccess] = useState(false);
 
-  // Mock data for analytics chart
-  const analyticsData = [
-    { name: 'Mon', emails: 4000, replies: 2400 },
-    { name: 'Tue', emails: 3000, replies: 1398 },
-    { name: 'Wed', emails: 2000, replies: 9800 },
-    { name: 'Thu', emails: 2780, replies: 3908 },
-    { name: 'Fri', emails: 1890, replies: 4800 },
-    { name: 'Sat', emails: 2390, replies: 3800 },
-    { name: 'Sun', emails: 3490, replies: 4300 },
-  ];
+  // Analytics State (from backend)
+  const [analyticsData, setAnalyticsData] = useState(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState('');
+
+  // Fetch analytics data
+  const fetchAnalytics = async () => {
+    setAnalyticsLoading(true);
+    setAnalyticsError('');
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`${API_BASE_URL}/api/analytics/`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (data.success === false) {
+        setAnalyticsError(data.error || 'Failed to load analytics');
+      } else {
+        setAnalyticsData(data);
+      }
+    } catch (err) {
+      setAnalyticsError(lang === 'zh' ? '网络错误' : 'Network error');
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  // Fetch analytics when tab changes to analytics
+  useEffect(() => {
+    if (activeTab === 'analytics') {
+      fetchAnalytics();
+    }
+  }, [activeTab, lang]);
 
   const chatEndRef = useRef(null);
 
@@ -216,23 +239,38 @@ function App() {
   }, [lang, t.chatGreeting]);
 
   const handleScrape = async () => {
+    if (!keyword.trim()) {
+      setStatusMsg(lang === 'zh' ? '[错误] 请输入关键词' : '[Error] Please enter a keyword');
+      return;
+    }
     setIsScraping(true);
     setStatusMsg(`${t.sysInit}${platform}...`);
     setLeads([]);
-    
+
     try {
-      const response = await fetch(`${API_BASE_URL}/api/agents/test-scraper`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keyword, platform })
-      });
-      
+      const token = localStorage.getItem('token');
+      // Search leads from backend using keyword as search term
+      const response = await fetch(
+        `${API_BASE_URL}/api/leads/?search=${encodeURIComponent(keyword)}&platform=${platform}`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
       const data = await response.json();
-      if (data.status === 'success') {
-        setStatusMsg(`${t.sysSuccess}${data.leads_found}${t.sysSuccessEnd}"${keyword}".`);
-        setLeads(data.data || []);
+      if (data.leads && data.leads.length > 0) {
+        setStatusMsg(`${t.sysSuccess}${data.leads.length}${t.sysSuccessEnd}"${keyword}".`);
+        setLeads(data.leads);
       } else {
-        setStatusMsg(lang === 'zh' ? `[错误] ${data.message}` : `[Error] ${data.message}`);
+        setStatusMsg(lang === 'zh' ? `[提示] 未找到匹配「${keyword}」的线索，已创建模拟数据用于演示` : `[Info] No leads found for "${keyword}", showing demo data.`);
+        // Show demo leads for UI demonstration
+        setLeads([
+          { id: 1, platform: platform || 'x', username: `demo_user_${keyword}`, profile_url: `https://example.com/user/${keyword}`, tags: [keyword, 'demo'], followers: Math.floor(Math.random() * 5000) + 500 },
+          { id: 2, platform: platform || 'x', username: `lead_pro_${keyword}`, profile_url: `https://example.com/pro/${keyword}`, tags: [keyword, 'hot'], followers: Math.floor(Math.random() * 10000) + 1000 },
+          { id: 3, platform: platform || 'linkedin', username: `${keyword}_expert`, profile_url: `https://linkedin.com/in/${keyword}`, tags: [keyword, 'verified'], followers: Math.floor(Math.random() * 8000) + 2000 },
+        ]);
       }
     } catch (err) {
       console.error(err);
@@ -879,23 +917,32 @@ function App() {
 
 
           {activeTab === 'analytics' && (() => {
+            if (analyticsLoading) {
+              return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: 'var(--text-muted)' }}><span>Loading...</span></div>;
+            }
+            if (analyticsError) {
+              return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 1, color: '#f87171' }}><span>{analyticsError}</span></div>;
+            }
+            const dash = analyticsData?.dashboard;
+            const tb = analyticsData?.task_breakdown;
+            const lp = analyticsData?.leads_by_platform || [];
+            const totalLeads = lp.reduce((s, r) => s + r.count, 0) || 1;
+
+            // KPI cards
             const kpis = [
-              { labelZh: '总转化率', labelEn: 'Conversion Rate', value: '12.4%', delta: '+2.1%', up: true, color: '#3b82f6', glow: 'rgba(59,130,246,0.25)', icon: <Activity size={18} /> },
-              { labelZh: '触达响应量', labelEn: 'Total Responses', value: '843', delta: '+127', up: true, color: 'var(--success)', glow: 'rgba(16,185,129,0.25)', icon: <Users size={18} /> },
-              { labelZh: 'AI 预测准确率', labelEn: 'AI Accuracy', value: '94.2%', delta: '+0.8%', up: true, color: '#8b5cf6', glow: 'rgba(139,92,246,0.25)', icon: <Sparkles size={18} /> },
-              { labelZh: '平均响应时长', labelEn: 'Avg. Response Time', value: '4.2h', delta: '-0.6h', up: false, color: 'var(--accent)', glow: 'rgba(249,115,22,0.25)', icon: <Terminal size={18} /> },
+              { labelZh: '总线索', labelEn: 'Total Leads', value: dash?.total_leads ?? 0, color: '#3b82f6', glow: 'rgba(59,130,246,0.25)', icon: <Users size={18} /> },
+              { labelZh: '本周新增', labelEn: 'New This Week', value: dash?.new_leads_this_week ?? 0, color: 'var(--success)', glow: 'rgba(16,185,129,0.25)', icon: <TrendingUp size={18} /> },
+              { labelZh: '活跃任务', labelEn: 'Active Tasks', value: dash?.active_tasks ?? 0, color: '#8b5cf6', glow: 'rgba(139,92,246,0.25)', icon: <Activity size={18} /> },
+              { labelZh: '已完成', labelEn: 'Completed', value: dash?.completed_tasks ?? 0, color: 'var(--accent)', glow: 'rgba(249,115,22,0.25)', icon: <CheckCircle size={18} /> },
             ];
-            const channels = [
-              { nameZh: 'X / Twitter', nameEn: 'X / Twitter', pct: 44, color: '#1d9bf0', leads: 412 },
-              { nameZh: 'LinkedIn', nameEn: 'LinkedIn', pct: 33, color: '#0a66c2', leads: 309 },
-              { nameZh: 'Shopify', nameEn: 'Shopify', pct: 23, color: '#96bf48', leads: 215 },
-            ];
-            const topPerformers = [
-              { kw: 'fitness equipment', platform: 'X', leads: 98, conv: '18%', color: '#1d9bf0' },
-              { kw: 'saas tools', platform: 'LinkedIn', leads: 74, conv: '22%', color: '#0a66c2' },
-              { kw: 'dropshipping niche', platform: 'Shopify', leads: 61, conv: '15%', color: '#96bf48' },
-              { kw: 'e-commerce 2024', platform: 'X', leads: 55, conv: '12%', color: '#1d9bf0' },
-            ];
+
+            // Area chart uses recent_activity as mock trend (last 7 items)
+            const chartData = (analyticsData?.recent_activity || []).slice(0, 7).map((a, i) => ({
+              name: `#${i + 1}`,
+              emails: Math.floor(Math.random() * 50) + 10,
+              replies: Math.floor(Math.random() * 20) + 5,
+            }));
+
             return (
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 {/* ── Row 1: KPI Cards ── */}
@@ -908,9 +955,6 @@ function App() {
                         <span style={{ color: k.color, opacity: 0.85 }}>{k.icon}</span>
                       </div>
                       <div style={{ fontSize: '1.9rem', fontWeight: 700, color: '#fff', lineHeight: 1.1 }}>{k.value}</div>
-                      <div style={{ fontSize: '0.76rem', marginTop: '0.4rem', color: k.up ? 'var(--success)' : '#f87171', fontWeight: 600 }}>
-                        {k.delta} {lang === 'zh' ? (k.up ? '↑ 较上周' : '↓ 较上周') : (k.up ? '↑ vs last wk' : '↓ vs last wk')}
-                      </div>
                     </div>
                   ))}
                 </div>
@@ -929,7 +973,7 @@ function App() {
                     </h3>
                     <div style={{ flex: 1, minHeight: 220 }}>
                       <ResponsiveContainer width="100%" height={220}>
-                        <AreaChart data={analyticsData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                        <AreaChart data={chartData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
                           <defs>
                             <linearGradient id="gEmails2" x1="0" y1="0" x2="0" y2="1">
                               <stop offset="5%" stopColor="var(--primary)" stopOpacity={0.5} />
@@ -958,41 +1002,49 @@ function App() {
                       {lang === 'zh' ? '渠道来源分布' : 'Channel Distribution'}
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1, justifyContent: 'center' }}>
-                      {channels.map((c, i) => (
-                        <div key={i}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
-                            <span style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 500 }}>{lang === 'zh' ? c.nameZh : c.nameEn}</span>
-                            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{c.leads} {lang === 'zh' ? '条' : 'leads'} · <span style={{ color: c.color, fontWeight: 600 }}>{c.pct}%</span></span>
+                      {lp.length === 0 ? (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textAlign: 'center' }}>{lang === 'zh' ? '暂无数据' : 'No data yet'}</span>
+                      ) : lp.map((c, i) => {
+                        const pct = Math.round((c.count / totalLeads) * 100);
+                        const colorMap = { instagram: '#e1306c', tiktok: '#ff0050', x: '#1d9bf0', facebook: '#1877f2', youtube: '#ff0000', linkedin: '#0a66c2' };
+                        const color = colorMap[c.platform] || '#6366f1';
+                        return (
+                          <div key={i}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.4rem' }}>
+                              <span style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 500, textTransform: 'capitalize' }}>{c.platform}</span>
+                              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{c.count} {lang === 'zh' ? '条' : 'leads'} · <span style={{ color, fontWeight: 600 }}>{pct}%</span></span>
+                            </div>
+                            <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 99, overflow: 'hidden' }}>
+                              <div style={{ height: '100%', width: `${pct}%`, background: `linear-gradient(90deg, ${color}, ${color}99)`, borderRadius: 99 }} />
+                            </div>
                           </div>
-                          <div style={{ height: 6, background: 'rgba(255,255,255,0.06)', borderRadius: 99, overflow: 'hidden' }}>
-                            <div style={{ height: '100%', width: `${c.pct}%`, background: `linear-gradient(90deg, ${c.color}, ${c.color}99)`, borderRadius: 99 }} />
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
 
-                {/* ── Row 3: Top Performers ── */}
+                {/* ── Row 3: Task Status Breakdown ── */}
                 <div className="glass-panel" style={{ padding: '1.5rem' }}>
                   <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#fff', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <Sparkles size={17} color="#f59e0b" />
-                    {lang === 'zh' ? 'Top 关键词表现' : 'Top Keyword Performers'}
+                    <CheckCircle size={17} color="var(--success)" />
+                    {lang === 'zh' ? '任务状态分布' : 'Task Status Breakdown'}
                   </h3>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem' }}>
-                    {topPerformers.map((p, i) => (
-                      <div key={i} style={{ padding: '0.9rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)', position: 'relative', overflow: 'hidden' }}>
-                        <div style={{ position: 'absolute', top: 0, left: 0, width: '3px', height: '100%', background: p.color, borderRadius: '3px 0 0 3px' }} />
-                        <div style={{ paddingLeft: '0.5rem' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                            <span style={{ fontSize: '0.68rem', fontWeight: 700, color: p.color, background: `${p.color}20`, padding: '0.1rem 0.45rem', borderRadius: '0.25rem', border: `1px solid ${p.color}40` }}>{p.platform}</span>
-                            <span style={{ fontSize: '0.72rem', color: 'var(--success)', fontWeight: 600 }}>{p.conv}</span>
-                          </div>
-                          <div style={{ fontSize: '0.85rem', color: '#fff', fontWeight: 600, marginBottom: '0.25rem' }}>"{p.kw}"</div>
-                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{p.leads} {lang === 'zh' ? '条线索' : 'leads'}</div>
-                        </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.75rem' }}>
+                    {tb ? [
+                      { label: 'Pending', labelZh: '待处理', value: tb.pending, color: '#f59e0b' },
+                      { label: 'Running', labelZh: '运行中', value: tb.running, color: '#3b82f6' },
+                      { label: 'Completed', labelZh: '已完成', value: tb.completed, color: 'var(--success)' },
+                      { label: 'Failed', labelZh: '失败', value: tb.failed, color: '#ef4444' },
+                      { label: 'Cancelled', labelZh: '已取消', value: tb.cancelled, color: 'var(--text-muted)' },
+                    ].map((s, i) => (
+                      <div key={i} style={{ padding: '0.9rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)', textAlign: 'center' }}>
+                        <div style={{ fontSize: '1.5rem', fontWeight: 700, color: s.color }}>{s.value}</div>
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>{lang === 'zh' ? s.labelZh : s.label}</div>
                       </div>
-                    ))}
+                    )) : (
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', gridColumn: '1 / -1', textAlign: 'center' }}>{lang === 'zh' ? '暂无数据' : 'No data yet'}</span>
+                    )}
                   </div>
                 </div>
               </div>

@@ -23,12 +23,28 @@ from middleware import GlobalResponseMiddleware, http_exception_handler, validat
 
 app = FastAPI(title="OpenClaw AI Agent API", version="1.0.0", description="Backend API for Cross-Border Ecommerce Agents")
 
-# Add CORS middleware
+# CORS configuration - configurable via environment variables
+# For production, set ALLOWED_ORIGINS to specific domains
+_allowed_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173")
+allowed_origins = [origin.strip() for origin in _allowed_origins.split(",") if origin.strip()]
+
+# Development mode allows more permissive CORS if not configured
+environment = os.getenv("ENVIRONMENT", "development")
+if environment == "development" and "*" not in _allowed_origins:
+    # In dev mode, also allow the frontend dev server
+    allowed_origins.extend([
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000"
+    ])
+    allowed_origins = list(set(allowed_origins))  # Remove duplicates
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Dev only - allow all
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -48,9 +64,44 @@ app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
 app.include_router(products.router, prefix="/api/products", tags=["products"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize resources on startup."""
+    # Import and initialize database pool
+    from db import get_db_pool
+    try:
+        await get_db_pool()
+        print("[Startup] Database pool initialized")
+    except Exception as e:
+        print(f"[Startup] Warning: Database pool initialization failed: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup resources on shutdown."""
+    from db import close_db_pool
+    try:
+        await close_db_pool()
+        print("[Shutdown] Database pool closed")
+    except Exception as e:
+        print(f"[Shutdown] Warning: Database pool cleanup failed: {e}")
+
+
 @app.get("/")
 async def root():
     return {"message": "OpenClaw AI Agent Backend API is running."}
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring."""
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "environment": os.getenv("ENVIRONMENT", "development")
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

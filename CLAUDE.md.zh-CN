@@ -1,0 +1,82 @@
+# OpenClaw AI Agent
+
+跨境电商获客 + 客服自动化 AI Agent 系统
+
+## 프로젝트 구조
+
+```
+OpenClaw AI Agent/
+├── agents/                    # AI 에이전트 구현
+│   ├── base_agent.py          # 추상 기본 클래스
+│   ├── lead_agent/            # 리드 추출 (X/Twitter)
+│   ├── linkedin_agent/        # LinkedIn 리드 추출
+│   ├── facebook_agent/        # Facebook 리드 추출
+│   └── ...                    # 기타 에이전트
+│
+├── backend/                   # FastAPI 백엔드
+│   ├── main.py               # 앱 진입점
+│   ├── db.py                 # DB 작업 (커넥션 풀, UPSERT)
+│   └── api/                  # API 라우트
+│       ├── auth.py           # 인증 (JWT)
+│       ├── leads.py          # 리드 CRUD
+│       └── tasks.py          # 태스크 큐
+│
+├── frontend/                 # React + Vite 프론트엔드
+│   └── src/App.jsx          # 메인 앱
+│
+├── browser_cluster/           # Playwright 브라우저 클러스터
+│   └── manager/
+│       ├── browser_manager.py
+│       └── browser_pool.py  # 상주 브라우저 풀
+│
+├── database/                  # PostgreSQL
+│   └── migrations/
+│       └── init.sql         # DB 초기화
+│
+├── .claude/                  # Claude Code 설정
+│   ├── settings.json        # Hooks 설정
+│   ├── skills/              # 커스텀 스킬
+│   └── agents/              # 서브에이전트
+│
+└── scripts/                  # 자동화 스크립트
+```
+
+## 빠른 시작
+
+```bash
+# 1. 환경 변수 설정
+cp .env.example .env
+# .env 파일 편집
+
+# 2. 백엔드 시작
+cd backend && python main.py
+
+# 3. 프론트엔드 시작
+cd frontend && npm run dev
+```
+
+## 기술 스택
+
+| 레이어 | 기술 |
+|--------|------|
+| 프론트엔드 | React 18, TailwindCSS v4, Lucide React, Recharts |
+| 백엔드 | FastAPI, asyncpg, Pydantic, bcrypt, JWT |
+| 브라우저 | Playwright, playwright-stealth |
+| DB | PostgreSQL |
+
+## API 엔드포인트
+
+| 라우트 | 메서드 | 설명 |
+|--------|--------|------|
+| `/api/auth/register` | POST | 사용자 등록 |
+| `/api/auth/login` | POST | 사용자 로그인 |
+| `/api/leads/` | GET | 리드 목록 조회 |
+| `/api/tasks/` | POST | 태스크 생성 |
+| `/api/agents/test-scraper` | POST | 스크래퍼 실행 |
+
+## 安全注意
+
+- JWT 인증 ✓
+- bcrypt 비밀번호 해시 ✓
+- CORS 설정 ✓
+- 환경 변수 민감 정보 보호 ✓
