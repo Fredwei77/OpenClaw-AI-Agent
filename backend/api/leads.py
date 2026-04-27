@@ -70,44 +70,50 @@ async def get_leads(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            conditions = ["user_id = $1"]
-            params = [current_user.id]
-            param_idx = 2
+            conditions = []
+            params = []
+            param_idx = 1
+
+            # Always filter by user_id
+            conditions.append(f"user_id = ${param_idx}")
+            params.append(current_user.id)
+            param_idx += 1
 
             if status_filter:
                 if status_filter not in VALID_LEAD_STATUSES:
                     raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of {VALID_LEAD_STATUSES}")
-                conditions.append(f"AND status = ${param_idx}")
+                conditions.append(f"status = ${param_idx}")
                 params.append(status_filter)
                 param_idx += 1
 
             if platform:
                 if platform not in VALID_PLATFORMS:
                     raise HTTPException(status_code=400, detail=f"Invalid platform. Must be one of {VALID_PLATFORMS}")
-                conditions.append(f"AND platform = ${param_idx}")
+                conditions.append(f"platform = ${param_idx}")
                 params.append(platform)
                 param_idx += 1
 
             if search:
-                escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                conditions.append(f"AND (username ILIKE ${param_idx} OR email ILIKE ${param_idx})")
+                # Simple escape - just escape special chars for LIKE
+                escaped = search.replace("%", "\\%").replace("_", "\\_")
+                conditions.append(f"(username ILIKE ${param_idx} OR email ILIKE ${param_idx})")
                 params.append(f"%{escaped}%")
                 param_idx += 1
 
             if min_followers is not None:
-                conditions.append(f"AND followers >= ${param_idx}")
+                conditions.append(f"followers >= ${param_idx}")
                 params.append(min_followers)
                 param_idx += 1
 
             if max_followers is not None:
-                conditions.append(f"AND followers <= ${param_idx}")
+                conditions.append(f"followers <= ${param_idx}")
                 params.append(max_followers)
                 param_idx += 1
 
             if tags:
                 tag_list = [t.strip() for t in tags.split(",") if t.strip()]
                 for tag in tag_list:
-                    conditions.append(f"AND ${param_idx} = ANY(tags)")
+                    conditions.append(f"${param_idx} = ANY(tags)")
                     params.append(tag)
                     param_idx += 1
 
@@ -155,7 +161,9 @@ async def get_leads(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Database error")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.get("/{lead_id}", response_model=LeadResponse)
@@ -190,7 +198,9 @@ async def get_lead(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Database error")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.post("/", response_model=LeadResponse, status_code=status.HTTP_201_CREATED)
@@ -227,7 +237,9 @@ async def create_lead(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Database error")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.patch("/{lead_id}", response_model=LeadResponse)
@@ -315,7 +327,9 @@ async def update_lead(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Database error")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
 @router.delete("/{lead_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -337,5 +351,7 @@ async def delete_lead(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail="Database error")
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
         return None

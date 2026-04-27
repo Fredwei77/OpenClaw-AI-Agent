@@ -141,6 +141,16 @@ function App() {
   const [isScraping, setIsScraping] = useState(false);
   const [leads, setLeads] = useState([]);
   const [statusMsg, setStatusMsg] = useState('');
+
+  // Auth State
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [loginError, setLoginError] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [isRegisterMode, setIsRegisterMode] = useState(false);
+  const [registerName, setRegisterName] = useState('');
   
   // Marketing Engine State
   const [marketingLoading, setMarketingLoading] = useState(false);
@@ -210,6 +220,83 @@ function App() {
     }
   };
 
+  // Check auth status on mount
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      setIsLoggedIn(true);
+      setAuthLoading(false);
+    } else {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `username=${encodeURIComponent(loginEmail)}&password=${encodeURIComponent(loginPassword)}`
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Login failed');
+      }
+      localStorage.setItem('token', data.access_token);
+      setIsLoggedIn(true);
+      setUser({ email: loginEmail });
+      setLoginEmail('');
+      setLoginPassword('');
+    } catch (err) {
+      setLoginError(err.message || (lang === 'zh' ? '登录失败' : 'Login failed'));
+    }
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setLoginError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: loginEmail, password: loginPassword, name: registerName || loginEmail.split('@')[0] })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || data.detail || 'Registration failed');
+      }
+      // Auto login after register
+      const loginRes = await fetch(`${API_BASE_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `username=${encodeURIComponent(loginEmail)}&password=${encodeURIComponent(loginPassword)}`
+      });
+      const loginData = await loginRes.json();
+      if (!loginRes.ok) {
+        throw new Error(loginData.error || 'Registration succeeded but login failed');
+      }
+      localStorage.setItem('token', loginData.access_token);
+      setIsLoggedIn(true);
+      setUser({ email: loginEmail });
+      setLoginEmail('');
+      setLoginPassword('');
+      setRegisterName('');
+      setIsRegisterMode(false);
+    } catch (err) {
+      setLoginError(err.message || (lang === 'zh' ? '注册失败' : 'Registration failed'));
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setIsLoggedIn(false);
+    setUser(null);
+    setLeads([]);
+    setAnalyticsData(null);
+  };
+
   // Fetch analytics when tab changes to analytics
   useEffect(() => {
     if (activeTab === 'analytics') {
@@ -249,20 +336,39 @@ function App() {
 
     try {
       const token = localStorage.getItem('token');
-      // Search leads from backend using keyword as search term
+      // Call the actual scraping endpoint using LeadAgent
       const response = await fetch(
-        `${API_BASE_URL}/api/leads/?search=${encodeURIComponent(keyword)}&platform=${platform}`,
-        { headers: { 'Authorization': `Bearer ${token}` } }
+        `${API_BASE_URL}/api/agents/test-scraper`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            keyword: keyword,
+            platform: platform || 'x'
+          })
+        }
       );
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const data = await response.json();
-      if (data.leads && data.leads.length > 0) {
-        setStatusMsg(`${t.sysSuccess}${data.leads.length}${t.sysSuccessEnd}"${keyword}".`);
-        setLeads(data.leads);
+      const result = await response.json();
+
+      if (result.status === 'success' && result.data && result.data.length > 0) {
+        setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".`);
+        setLeads(result.data);
+      } else if (result.status === 'error') {
+        setStatusMsg(lang === 'zh' ? `[错误] 爬取失败: ${result.message}` : `[Error] Scraping failed: ${result.message}`);
+        // Show demo leads on error for UI demonstration
+        setLeads([
+          { id: 1, platform: platform || 'x', username: `demo_user_${keyword}`, profile_url: `https://example.com/user/${keyword}`, tags: [keyword, 'demo'], followers: Math.floor(Math.random() * 5000) + 500 },
+          { id: 2, platform: platform || 'x', username: `lead_pro_${keyword}`, profile_url: `https://example.com/pro/${keyword}`, tags: [keyword, 'hot'], followers: Math.floor(Math.random() * 10000) + 1000 },
+          { id: 3, platform: platform || 'linkedin', username: `${keyword}_expert`, profile_url: `https://linkedin.com/in/${keyword}`, tags: [keyword, 'verified'], followers: Math.floor(Math.random() * 8000) + 2000 },
+        ]);
       } else {
         setStatusMsg(lang === 'zh' ? `[提示] 未找到匹配「${keyword}」的线索，已创建模拟数据用于演示` : `[Info] No leads found for "${keyword}", showing demo data.`);
         // Show demo leads for UI demonstration
@@ -381,6 +487,104 @@ function App() {
     setMarketPlugins(prev => prev.filter(p => p.id !== plugin.id));
   };
 
+  if (authLoading) {
+    return (
+      <div className="dashboard-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+        <div style={{ textAlign: 'center', color: 'var(--text-muted)' }}>
+          <Loader2 size={48} style={{ animation: 'spin 1s linear infinite', margin: '0 auto 1rem' }} />
+          <p>{lang === 'zh' ? '加载中...' : 'Loading...'}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isLoggedIn) {
+    return (
+      <div className="dashboard-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', background: 'var(--bg-primary)' }}>
+        <div style={{
+          background: 'rgba(0,0,0,0.4)',
+          border: '1px solid rgba(255,255,255,0.1)',
+          borderRadius: '12px',
+          padding: '2.5rem',
+          width: '100%',
+          maxWidth: '400px',
+          textAlign: 'center'
+        }}>
+          <h2 style={{ color: '#fff', marginBottom: '1.5rem', fontSize: '1.5rem' }}>{t.brand}</h2>
+          <form onSubmit={isRegisterMode ? handleRegister : handleLogin}>
+            {isRegisterMode && (
+              <input
+                type="text"
+                placeholder={lang === 'zh' ? '姓名' : 'Name'}
+                value={registerName}
+                onChange={e => setRegisterName(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '0.75rem 1rem',
+                  marginBottom: '1rem',
+                  background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '8px',
+                  color: '#fff',
+                  fontSize: '1rem',
+                  boxSizing: 'border-box'
+                }}
+              />
+            )}
+            <input
+              type="email"
+              placeholder="Email"
+              value={loginEmail}
+              onChange={e => setLoginEmail(e.target.value)}
+              required
+              style={{
+                width: '100%',
+                padding: '0.75rem 1rem',
+                marginBottom: '1rem',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '8px',
+                color: '#fff',
+                fontSize: '1rem',
+                boxSizing: 'border-box'
+              }}
+            />
+            <input
+              type="password"
+              placeholder={lang === 'zh' ? '密码' : 'Password'}
+              value={loginPassword}
+              onChange={e => setLoginPassword(e.target.value)}
+              required
+              style={{
+                width: '100%',
+                padding: '0.75rem 1rem',
+                marginBottom: '1rem',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: '8px',
+                color: '#fff',
+                fontSize: '1rem',
+                boxSizing: 'border-box'
+              }}
+            />
+            {loginError && (
+              <div style={{ color: '#ef4444', marginBottom: '1rem', fontSize: '0.9rem' }}>{loginError}</div>
+            )}
+            <button type="submit" className="btn" style={{ width: '100%', marginBottom: '1rem' }}>
+              {isRegisterMode ? (lang === 'zh' ? '注册' : 'Register') : (lang === 'zh' ? '登录' : 'Login')}
+            </button>
+          </form>
+          <button
+            onClick={() => { setIsRegisterMode(!isRegisterMode); setLoginError(''); }}
+            style={{ background: 'none', border: 'none', color: 'var(--primary)', cursor: 'pointer', fontSize: '0.9rem' }}
+          >
+            {isRegisterMode ? (lang === 'zh' ? '已有账号？登录' : 'Have an account? Login') : (lang === 'zh' ? '没有账号？注册' : 'No account? Register')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="dashboard-container">
       {/* Sidebar */}
@@ -431,7 +635,33 @@ function App() {
              activeTab === 'analytics' ? t.tabAnalytics : t.tabSettings}
           </h1>
           <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
-            <button 
+            {isLoggedIn ? (
+              <button
+                onClick={handleLogout}
+                style={{
+                  background: 'rgba(255,255,255,0.05)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  color: 'var(--text-main)',
+                  padding: '0.4rem 0.8rem',
+                  borderRadius: '2rem',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  fontFamily: 'inherit',
+                  fontWeight: 600,
+                  transition: 'all 0.3s ease',
+                  fontSize: '0.9rem'
+                }}
+              >
+                {lang === 'zh' ? '退出' : 'Logout'}
+              </button>
+            ) : (
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                {lang === 'zh' ? '未登录' : 'Not logged in'}
+              </span>
+            )}
+            <button
               onClick={() => setLang(l => l === 'zh' ? 'en' : 'zh')}
               style={{
                 background: 'rgba(255,255,255,0.05)',
@@ -457,7 +687,7 @@ function App() {
             </div>
           </div>
         </header>
-        
+
         <div className="content-body">
           {activeTab === 'dashboard' && (() => {
             const quickActions = [
