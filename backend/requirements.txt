@@ -1,0 +1,28 @@
+# Core
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# Database
+asyncpg>=0.29.0
+sqlalchemy>=2.0.25
+
+# Auth
+bcrypt>=4.1.2
+pyjwt>=2.8.0
+
+# Browser Automation
+playwright>=1.41.0
+playwright-stealth>=1.0.6
+
+# AI
+openai>=1.12.0
+
+# Redis & Monitoring
+redis[hiredis]>=5.0.0
+prometheus-client>=0.19.0
+
+# Utils
+python-dotenv>=1.0.0
+httpx>=0.26.0

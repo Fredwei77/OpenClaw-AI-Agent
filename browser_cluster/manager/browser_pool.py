@@ -43,6 +43,8 @@ class BrowserInstance:
     proxy_config: Optional[dict] = None
     user_data_dir: Optional[str] = None
     reference_count: int = 0
+    cdp_url: Optional[str] = None  # Chrome DevTools Protocol URL
+    is_connected: bool = False  # True if connected via CDP
 
 
 class BrowserPoolManager:
@@ -163,12 +165,43 @@ class BrowserPoolManager:
         except Exception as e:
             print(f"[BrowserPool] Error in _close_browser_instance: {e}")
 
-    async def _create_browser_instance(self, proxy: dict = None, user_data_dir: str = None) -> BrowserInstance:
-        """创建新的浏览器实例"""
+    async def _create_browser_instance(self, proxy: dict = None, user_data_dir: str = None, cdp_url: str = None) -> BrowserInstance:
+        """创建新的浏览器实例
+
+        Args:
+            proxy: 代理配置
+            user_data_dir: Chrome 用户数据目录（用于保持登录态）
+            cdp_url: Chrome DevTools Protocol URL（优先使用）
+        """
         instance_id = str(uuid.uuid4())[:8]
 
         playwright = await async_playwright().start()
 
+        browser = None
+
+        # 优先使用 CDP 连接（最稳定的方式保持登录态）
+        if cdp_url:
+            try:
+                print(f"[BrowserPool] Connecting to Chrome via CDP: {cdp_url}")
+                browser = await playwright.chromium.connect_over_cdp(cdp_url)
+                instance = BrowserInstance(
+                    instance_id=instance_id,
+                    browser=browser,
+                    playwright=playwright,
+                    proxy_config=proxy,
+                    user_data_dir=user_data_dir,
+                    cdp_url=cdp_url,
+                    is_connected=True
+                )
+                print(f"[BrowserPool] Connected to Chrome via CDP: {instance_id}")
+                return instance
+            except Exception as e:
+                print(f"[BrowserPool] CDP connection failed: {e}, falling back to launch")
+                # CDP 失败时停止 playwright，避免资源泄漏
+                await playwright.stop()
+                playwright = None
+
+        # 使用普通 launch 方式
         launch_options = {
             "headless": True,
             "args": [
@@ -177,6 +210,12 @@ class BrowserPoolManager:
                 "--no-sandbox"
             ]
         }
+
+        # 如果配置了 user_data_dir，使用它来保持登录态
+        if user_data_dir:
+            # 确保目录存在
+            if os.path.exists(user_data_dir):
+                launch_options["user_data_dir"] = user_data_dir
 
         if proxy:
             launch_options["proxy"] = {
@@ -192,25 +231,29 @@ class BrowserPoolManager:
             browser=browser,
             playwright=playwright,
             proxy_config=proxy,
-            user_data_dir=user_data_dir
+            user_data_dir=user_data_dir,
+            cdp_url=cdp_url,
+            is_connected=False
         )
 
         print(f"[BrowserPool] Created new browser instance: {instance_id}")
         return instance
 
-    async def _get_available_instance(self, proxy: dict = None) -> BrowserInstance:
+    async def _get_available_instance(self, proxy: dict = None, user_data_dir: str = None, cdp_url: str = None) -> BrowserInstance:
         """获取或创建一个可用的浏览器实例"""
         # 尝试找一个健康的、有剩余容量的实例
         async with self._lock:
             for instance_id, instance in self._browsers.items():
                 if instance.is_healthy and len(instance.contexts) < 10:  # 每个浏览器最多10个context
-                    # 检查代理配置是否匹配
+                    # 检查代理配置、user_data_dir 和 cdp_url 是否匹配
                     if proxy == instance.proxy_config or not proxy:
-                        return instance
+                        if user_data_dir == instance.user_data_dir or not user_data_dir:
+                            if cdp_url == instance.cdp_url or not cdp_url:
+                                return instance
 
             # 如果没有可用实例且未达到上限，创建新的
             if len(self._browsers) < self.max_browsers:
-                instance = await self._create_browser_instance(proxy)
+                instance = await self._create_browser_instance(proxy, user_data_dir, cdp_url)
                 self._browsers[instance.instance_id] = instance
                 return instance
 
@@ -221,10 +264,18 @@ class BrowserPoolManager:
         self,
         context_id: str = None,
         proxy: dict = None,
-        user_data_dir: str = None
+        user_data_dir: str = None,
+        cdp_url: str = None
     ) -> tuple[str, BrowserContext, BrowserInstance]:
         """
         获取一个浏览器 context
+
+        Args:
+            context_id: Context ID
+            proxy: 代理配置
+            user_data_dir: Chrome 用户数据目录（用于保持登录态）
+            cdp_url: Chrome DevTools Protocol URL（优先使用）
+
 
         Returns:
             tuple[str, BrowserContext, BrowserInstance]: (context_id, context, instance)
@@ -236,7 +287,7 @@ class BrowserPoolManager:
         if context_id is None:
             context_id = str(uuid.uuid4())[:12]
 
-        instance = await self._get_available_instance(proxy)
+        instance = await self._get_available_instance(proxy, user_data_dir, cdp_url)
 
         async with self._lock:
             instance.reference_count += 1
@@ -311,6 +362,9 @@ class BrowserPoolManager:
                         "context_count": len(inst.contexts),
                         "reference_count": inst.reference_count,
                         "is_healthy": inst.is_healthy,
+                        "is_connected": inst.is_connected,
+                        "cdp_url": inst.cdp_url,
+                        "user_data_dir": inst.user_data_dir,
                         "created_at": inst.created_at.isoformat(),
                         "last_used": inst.last_used.isoformat()
                     }

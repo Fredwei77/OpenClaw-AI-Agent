@@ -83,21 +83,81 @@ cd frontend
 npm install
 ```
 
-### 3. Configuration
+### 3. 配置环境变量
 Copy the environment template and fill in your details:
 ```bash
 cp .env.example .env
 ```
-*Required: OpenAI/Claude API Keys, Database URL, Residential Proxy credentials.*
 
-### 4. Run
+#### 3.1 AI API Keys（必填）
+```env
+OPENAI_API_KEY=sk-...        # OpenAI API Key
+OPENROUTER_API_KEY=...       # OpenRouter API Key（推荐，支持多种模型）
+```
+
+#### 3.2 数据库配置（必填）
+```env
+DATABASE_URL=postgresql://postgres:password@localhost:5432/openclaw_db
+```
+
+#### 3.3 浏览器爬取登录态配置（推荐）
+要实现真实的 X/Twitter/LinkedIn 爬取，需要配置 Chrome 登录态：
+
+1. **在 Chrome 中登录 X/Twitter/LinkedIn**
+   - 关闭所有 Chrome 窗口
+   - 打开 Chrome，使用你的账号登录 X、LinkedIn 等平台
+   - 确认登录状态可以保持
+
+2. **复制 Chrome 用户数据目录路径**
+   - **Windows**: `C:/Users/你的用户名/AppData/Local/Google/Chrome/User Data`
+   - **Mac**: `/Users/你的用户名/Library/Application Support/Google/Chrome`
+   - **Linux**: `~/.config/google-chrome`
+
+3. **配置 .env**
+   ```env
+   CHROME_USER_DATA_DIR=C:/Users/你的用户名/AppData/Local/Google/Chrome/User Data
+   ```
+
+4. **重启后端服务使配置生效**
+
+#### 3.4 可选配置
+```env
+# 住宅代理（提高爬取稳定性）
+SCRAPER_PROXY=http://username:password@proxyhost:port
+
+# SerpAPI（合规的搜索结果API）
+SERPAPI_KEY=your-serpapi-key
+```
+
+### 4. 运行服务
+
+#### 启动后端服务
 ```bash
-# Start Backend
-python backend/main.py
+# 方式一：使用脚本
+./scripts/dev.sh
 
-# Start Frontend
+# 方式二：手动启动
+cd backend
+python main.py
+# 后端服务：http://localhost:8000
+# API 文档：http://localhost:8000/docs
+```
+
+#### 启动前端服务
+```bash
 cd frontend
+npm install  # 首次运行需要安装依赖
 npm run dev
+# 前端服务：http://localhost:5173
+```
+
+#### 验证服务运行
+```bash
+# 测试后端健康状态
+curl http://localhost:8000/api/health
+
+# 测试浏览器池状态
+curl http://localhost:8000/api/agents/browser-status
 ```
 
 ---

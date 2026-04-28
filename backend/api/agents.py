@@ -177,11 +177,21 @@ async def submit_task(request: TaskSubmitRequest, background_tasks: BackgroundTa
 async def _scrape_twitter(page, keyword: str) -> list:
     """Scrape Twitter/X for user profiles matching keyword"""
     import urllib.parse
+    import re
     leads = []
     encoded_keyword = urllib.parse.quote(keyword)
 
-    url = f"https://x.com/search?q={encoded_keyword}&src=typed_query&f=user"
+    # 使用更精确的搜索语法：只搜索账号
+    url = f"https://x.com/search?q=%40{encoded_keyword}&src=typed_query&f=user"
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+    # 等待页面加载
+    await asyncio.sleep(3)
+
+    # 向下滚动几次加载更多真实用户
+    for _ in range(3):
+        await page.evaluate("window.scrollBy(0, 800)")
+        await asyncio.sleep(1)
 
     # Wait for user cells with retry
     for attempt in range(3):
@@ -194,42 +204,73 @@ async def _scrape_twitter(page, keyword: str) -> list:
             await asyncio.sleep(1)
 
     user_cells = await page.query_selector_all('[data-testid="UserCell"]')
+    print(f"[API] Twitter: found {len(user_cells)} user cells")
 
-    for cell in user_cells[:15]:
+    for cell in user_cells[:20]:
         try:
-            # Try multiple selectors for name and handle
-            name_el = await cell.query_selector('div[dir="ltr"] > span')
-            handle_el = await cell.query_selector('span')
+            # 获取所有文本内容进行调试
+            all_texts = await cell.query_selector_all('span')
+            text_contents = [await t.text_content() for t in all_texts if await t.text_content()]
+            print(f"[API] Twitter cell texts: {text_contents[:5]}")
 
-            name = await name_el.text_content() if name_el else ""
+            # 查找 handle - 通常格式是 @username
             handle = ""
-            if handle_el:
-                text = await handle_el.text_content()
-                if "@" in text:
-                    handle = text
+            name = ""
 
-            if not handle:
-                # Alternative: look for text starting with @
-                all_texts = await cell.query_selector_all('span')
-                for t in all_texts:
-                    txt = await t.text_content()
-                    if txt and txt.startswith('@'):
-                        handle = txt
+            for text in text_contents:
+                text = text.strip()
+                # 匹配 Twitter handle 格式
+                if re.match(r'^@?[a-zA-Z0-9_]{1,15}$', text) and not text.startswith('@'):
+                    # 这可能是用户名（不带@的）
+                    if not handle:
+                        handle = f"@{text}"
+                elif text.startswith('@') and len(text) > 1:
+                    handle = text
+                    break
+
+            # 查找显示名称（通常是比较长的文本）
+            for text in text_contents:
+                text = text.strip()
+                if text and not text.startswith('@') and len(text) > 2 and len(text) < 50:
+                    # 排除数字和短文本
+                    if not re.match(r'^[0-9,]+$', text):
+                        name = text
                         break
 
+            # 验证 handle 格式
             if handle:
-                profile_url = f"https://x.com/{handle.strip('@')}"
-                # Extract followers if available
-                followers = 0
-                followers_el = await cell.query_selector('[data-testid="UserCell"] span')
-                leads.append({
-                    "platform": "x",
-                    "username": f"{name.strip()} ({handle})" if name else handle,
-                    "profile_url": profile_url,
-                    "email": None,
-                    "followers": followers,
-                    "tags": [keyword]
-                })
+                clean_handle = handle.strip('@')
+                # 验证是有效的 Twitter handle
+                if re.match(r'^[a-zA-Z0-9_]{1,15}$', clean_handle):
+                    profile_url = f"https://x.com/{clean_handle}"
+
+                    # 提取粉丝数（如果能找到）
+                    followers = 0
+                    for text in text_contents:
+                        # 匹配 "1.2M followers" 或 "12.5K" 格式
+                        if 'followers' in text.lower() or 'M' in text or 'K' in text:
+                            followers_text = text
+                            # 提取数字
+                            numbers = re.findall(r'[\d.]+', followers_text)
+                            if numbers:
+                                num = float(numbers[0])
+                                if 'M' in followers_text:
+                                    followers = int(num * 1000000)
+                                elif 'K' in followers_text:
+                                    followers = int(num * 1000)
+                                else:
+                                    followers = int(num)
+                            break
+
+                    leads.append({
+                        "platform": "x",
+                        "username": f"{name} ({handle})" if name else handle,
+                        "profile_url": profile_url,
+                        "email": None,
+                        "followers": followers,
+                        "tags": [keyword]
+                    })
+                    print(f"[API] Twitter: extracted @{clean_handle}, name={name}, followers={followers}")
         except Exception as e:
             print(f"[API] Twitter parse error: {e}")
             continue
@@ -605,11 +646,19 @@ async def test_scraper(request: ScrapeRequest):
         if proxy_url:
             proxy_config = {"host": proxy_url}
 
+        # 读取 Chrome 用户数据目录（用于保持登录态）
+        user_data_dir = os.getenv("CHROME_USER_DATA_DIR")
+
+        # 读取 CDP URL（优先使用，保持登录态更稳定）
+        cdp_url = os.getenv("CDP_URL")
+
         # 从池中获取 context
         context_id = f"scrape_{request.platform}_{id(request)}"
         context_id, context, instance = await pool.acquire_context(
             context_id=context_id,
-            proxy=proxy_config
+            proxy=proxy_config,
+            user_data_dir=user_data_dir,
+            cdp_url=cdp_url
         )
 
         try:

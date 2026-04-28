@@ -16,7 +16,7 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from api import auth, agents, tasks, leads, products, analytics
 from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
@@ -76,6 +76,22 @@ async def startup_event():
     except Exception as e:
         print(f"[Startup] Warning: Database pool initialization failed: {e}")
 
+    # Import and initialize browser pool
+    try:
+        from browser_cluster.manager.browser_pool import init_browser_pool
+        await init_browser_pool()
+        print("[Startup] Browser pool initialized")
+    except Exception as e:
+        print(f"[Startup] Warning: Browser pool initialization failed: {e}")
+
+    # Import and initialize task queue
+    try:
+        from scheduler.task_queue import init_task_queue
+        await init_task_queue()
+        print("[Startup] Task queue initialized")
+    except Exception as e:
+        print(f"[Startup] Warning: Task queue initialization failed: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -86,6 +102,30 @@ async def shutdown_event():
         print("[Shutdown] Database pool closed")
     except Exception as e:
         print(f"[Shutdown] Warning: Database pool cleanup failed: {e}")
+
+    # Close browser pool
+    try:
+        from browser_cluster.manager.browser_pool import shutdown_browser_pool
+        await shutdown_browser_pool()
+        print("[Shutdown] Browser pool closed")
+    except Exception as e:
+        print(f"[Shutdown] Warning: Browser pool cleanup failed: {e}")
+
+    # Close task queue
+    try:
+        from scheduler.task_queue import shutdown_task_queue
+        await shutdown_task_queue()
+        print("[Shutdown] Task queue closed")
+    except Exception as e:
+        print(f"[Shutdown] Warning: Task queue cleanup failed: {e}")
+
+    # Close Redis client
+    try:
+        from scheduler.task_queue import close_redis_client
+        await close_redis_client()
+        print("[Shutdown] Redis client closed")
+    except Exception as e:
+        print(f"[Shutdown] Warning: Redis client cleanup failed: {e}")
 
 
 @app.get("/")
@@ -101,6 +141,31 @@ async def health_check():
         "version": "1.0.0",
         "environment": os.getenv("ENVIRONMENT", "development")
     }
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus metrics endpoint."""
+    from monitoring.metrics import get_metrics_collector
+
+    collector = get_metrics_collector()
+
+    # Update browser pool metrics if available
+    try:
+        from browser_cluster.manager.browser_pool import get_browser_pool
+        pool = get_browser_pool()
+        status = await pool.get_pool_status()
+        collector.update_browser_pool(
+            browsers=status.get("total_browsers", 0),
+            contexts=status.get("total_contexts", 0)
+        )
+    except Exception:
+        pass
+
+    return Response(
+        content=collector.get_metrics(),
+        media_type=collector.get_content_type()
+    )
 
 
 if __name__ == "__main__":
