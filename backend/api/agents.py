@@ -54,11 +54,18 @@ class TaskStatusRequest(BaseModel):
 @router.post("/test-llm")
 async def test_llm(request: ChatRequest):
     """Test LLM connectivity via OpenRouter"""
+    # 检查 API Key 是否配置
+    if not API_KEY or API_KEY == "sk-or-v1-your-key-here":
+        return {
+            "status": "error",
+            "message": "OpenRouter API key not configured. Please set OPENROUTER_API_KEY in .env file. Get your key at https://openrouter.ai/keys"
+        }
+
     try:
         client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
         response = await client.chat.completions.create(
-            model="google/gemini-2.5-flash",
+            model="meta-llama/llama-3-8b-instruct",
             messages=[
                 {"role": "system", "content": "You are a helpful assistant for cross-border e-commerce."},
                 {"role": "user", "content": request.prompt}
@@ -70,7 +77,20 @@ async def test_llm(request: ChatRequest):
         )
         return {"status": "success", "reply": response.choices[0].message.content}
     except Exception as e:
-        return {"status": "error", "message": f"OpenRouter API call failed: {str(e)}"}
+        error_str = str(e)
+        # 提供更友好的错误提示
+        if "401" in error_str or "authentication" in error_str.lower():
+            return {
+                "status": "error",
+                "message": f"OpenRouter authentication failed. Please check your API key at https://openrouter.ai/keys. Error: {error_str}"
+            }
+        elif "connection" in error_str.lower() or "timeout" in error_str.lower():
+            return {
+                "status": "error",
+                "message": f"Failed to connect to OpenRouter. Please check your internet connection. Error: {error_str}"
+            }
+        else:
+            return {"status": "error", "message": f"OpenRouter API call failed: {error_str}"}
 
 
 # ========================
