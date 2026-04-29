@@ -8,7 +8,6 @@ import sys
 from typing import Generator
 
 import pytest
-from fastapi.testclient import TestClient
 
 # Ensure project root is in path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
