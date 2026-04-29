@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,6 +30,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest pytest-asyncio httpx python-dotenv bcrypt asyncpg "python-jose[cryptography]" openai fastapi uvicorn
+
+      - name: Debug conftest
+        run: |
+          head -15 ${{ github.workspace }}/tests/conftest.py
 
       - name: Run pytest
         run: |
