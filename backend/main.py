@@ -1,6 +1,15 @@
 import os
 import sys
 import asyncio
+import logging
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # 修复 Windows 平台下 Uvicorn 默认选用 SelectorEventLoop 导致 Playwright 无法启动 Subprocess 的缺陷
 if sys.platform == "win32":
@@ -72,25 +81,25 @@ async def startup_event():
     from db import get_db_pool
     try:
         await get_db_pool()
-        print("[Startup] Database pool initialized")
+        logger.info("Database pool initialized")
     except Exception as e:
-        print(f"[Startup] Warning: Database pool initialization failed: {e}")
+        logger.error(f"Database pool initialization failed: {e}")
 
     # Import and initialize browser pool
     try:
         from browser_cluster.manager.browser_pool import init_browser_pool
         await init_browser_pool()
-        print("[Startup] Browser pool initialized")
+        logger.info("Browser pool initialized")
     except Exception as e:
-        print(f"[Startup] Warning: Browser pool initialization failed: {e}")
+        logger.error(f"Browser pool initialization failed: {e}")
 
     # Import and initialize task queue
     try:
         from scheduler.task_queue import init_task_queue
         await init_task_queue()
-        print("[Startup] Task queue initialized")
+        logger.info("Task queue initialized")
     except Exception as e:
-        print(f"[Startup] Warning: Task queue initialization failed: {e}")
+        logger.error(f"Task queue initialization failed: {e}")
 
 
 @app.on_event("shutdown")
@@ -99,33 +108,33 @@ async def shutdown_event():
     from db import close_db_pool
     try:
         await close_db_pool()
-        print("[Shutdown] Database pool closed")
+        logger.info("Database pool closed")
     except Exception as e:
-        print(f"[Shutdown] Warning: Database pool cleanup failed: {e}")
+        logger.error(f"Database pool cleanup failed: {e}")
 
     # Close browser pool
     try:
         from browser_cluster.manager.browser_pool import shutdown_browser_pool
         await shutdown_browser_pool()
-        print("[Shutdown] Browser pool closed")
+        logger.info("Browser pool closed")
     except Exception as e:
-        print(f"[Shutdown] Warning: Browser pool cleanup failed: {e}")
+        logger.error(f"Browser pool cleanup failed: {e}")
 
     # Close task queue
     try:
         from scheduler.task_queue import shutdown_task_queue
         await shutdown_task_queue()
-        print("[Shutdown] Task queue closed")
+        logger.info("Task queue closed")
     except Exception as e:
-        print(f"[Shutdown] Warning: Task queue cleanup failed: {e}")
+        logger.error(f"Task queue cleanup failed: {e}")
 
     # Close Redis client
     try:
         from scheduler.task_queue import close_redis_client
         await close_redis_client()
-        print("[Shutdown] Redis client closed")
+        logger.info("Redis client closed")
     except Exception as e:
-        print(f"[Shutdown] Warning: Redis client cleanup failed: {e}")
+        logger.error(f"Redis client cleanup failed: {e}")
 
 
 @app.get("/")
