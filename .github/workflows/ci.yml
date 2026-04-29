@@ -33,7 +33,8 @@ jobs:
 
       - name: Debug conftest
         run: |
-          head -15 ${{ github.workspace }}/tests/conftest.py
+          echo "=== conftest.py ===" && head -15 ${{ github.workspace }}/tests/conftest.py
+          echo "=== pip list ===" && pip list | grep -i fastapi
 
       - name: Run pytest
         run: |
