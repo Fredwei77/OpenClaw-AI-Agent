@@ -15,7 +15,7 @@ import sys
 import asyncio
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -35,6 +35,32 @@ class MarketingLead:
     lead_score: float  # 0-100
     tier: str  # A, B, C
     tags: List[str]
+
+
+@dataclass
+class OutreachMessage:
+    """触达消息结构"""
+    channel: str  # email, linkedin, twitter, facebook
+    subject: str = ""
+    opening_line: str = ""
+    value_proposition: str = ""
+    body: str = ""
+    call_to_action: str = ""
+    closing: str = ""
+    tone: str = "professional"  # professional, casual, formal
+    estimated_response_rate: float = 0.0
+
+
+@dataclass
+class CampaignReport:
+    """营销活动报告"""
+    campaign_id: str
+    generated_at: str
+    summary: Dict
+    lead_segments: Dict
+    outreach_messages: List[OutreachMessage]
+    recommendations: List[str]
+    metrics: Dict = field(default_factory=dict)
 
 
 class MarketingAgent(BaseAgent):
@@ -67,6 +93,7 @@ class MarketingAgent(BaseAgent):
 
     def __init__(self, name: str = "MarketingAgent", browser_manager=None, db=None):
         super().__init__(name, browser_manager, db)
+        self.from_name = os.getenv("SENDER_NAME", "OpenClaw Team")
 
     async def run(self, task: dict) -> Dict:
         """
@@ -296,12 +323,389 @@ class MarketingAgent(BaseAgent):
 
         return result
 
+    async def generate_personalized_message(
+        self,
+        lead: Dict,
+        channel: str = "email",
+        tone: str = "professional"
+    ) -> OutreachMessage:
+        """
+        AI 生成个性化触达消息
+
+        Args:
+            lead: 线索数据
+            channel: 触达渠道 (email, linkedin, twitter)
+            tone: 语气风格 (professional, casual, formal)
+
+        Returns:
+            OutreachMessage: 结构化的触达消息
+        """
+        # 分析线索特征
+        name = lead.get("username", "").split()[0] if lead.get("username") else "there"
+        topic = lead.get("tags", [""])[0] if lead.get("tags") else "business"
+        company = lead.get("tags", [""])[1] if len(lead.get("tags", [])) > 1 else "your company"
+        platform = lead.get("platform", "social media")
+        followers = lead.get("followers", 0)
+
+        # 根据渠道选择不同的消息模板
+        if channel == "email":
+            return await self._generate_email_message(lead, name, topic, company, tone)
+        elif channel == "linkedin":
+            return await self._generate_linkedin_message(lead, name, topic, company, tone)
+        elif channel == "twitter":
+            return await self._generate_twitter_message(lead, name, topic, tone)
+        else:
+            return await self._generate_email_message(lead, name, topic, company, tone)
+
+    async def _generate_email_message(
+        self,
+        lead: Dict,
+        name: str,
+        topic: str,
+        company: str,
+        tone: str
+    ) -> OutreachMessage:
+        """生成邮件消息"""
+
+        # 根据线索评分调整消息长度和详细程度
+        lead_score = lead.get("lead_score", 50)
+        tier = lead.get("tier", "B")
+
+        # A级客户 - 更详细、更个性化的消息
+        if tier == "A":
+            opening_lines = [
+                f"Hi {name}, I've been following your impressive work in the {topic} space,",
+                f"Hi {name}, your approach to {topic} caught my attention,",
+                f"Hi {name}, I noticed how you're leading innovation in {topic},"
+            ]
+            value_props = [
+                "We've helped similar companies achieve 3x growth in qualified leads while reducing acquisition costs by 45%.",
+                "Our AI-powered system has helped businesses like yours automate outreach and scale their lead generation efforts.",
+                "Companies in the {topic} space have seen remarkable results with our platform - typically 3x more leads within 60 days."
+            ]
+            ctas = [
+                "Would you be open to a 20-minute call this week to explore if there's a potential fit?",
+                "I'd love to share how we've helped similar businesses. Are you available for a quick chat?",
+                "Would you be interested in seeing how we've helped companies like yours? Happy to share some examples."
+            ]
+        # B级客户 - 中等长度
+        elif tier == "B":
+            opening_lines = [
+                f"Hi {name}, I came across your work on {topic} and wanted to reach out,",
+                f"Hi {name}, I noticed you work in the {topic} space,",
+            ]
+            value_props = [
+                "We help businesses automate lead generation and customer outreach.",
+                "Our platform has helped companies like yours scale their sales pipeline.",
+            ]
+            ctas = [
+                "Would you be interested in a brief call to learn more?",
+                "Open to chatting if you're looking for ways to improve your lead generation?"
+            ]
+        # C级客户 - 简洁
+        else:
+            opening_lines = [f"Hi {name}, I noticed your work in {topic}."]
+            value_props = ["We help companies automate their outbound sales process."]
+            ctas = ["Worth a quick chat?"]
+
+        import random
+        msg = OutreachMessage(
+            channel="email",
+            subject=f"Quick question about {topic}",
+            opening_line=random.choice(opening_lines),
+            value_proposition=random.choice(value_props).replace("{topic}", topic),
+            call_to_action=random.choice(ctas),
+            tone=tone,
+            estimated_response_rate=0.15 if tier == "A" else 0.08 if tier == "B" else 0.03
+        )
+
+        # 组合完整邮件正文
+        msg.body = self._compose_email_body(msg, lead)
+
+        return msg
+
+    def _compose_email_body(self, msg: OutreachMessage, lead: Dict) -> str:
+        """组合完整邮件正文"""
+        name = lead.get("username", "").split()[0] if lead.get("username") else "there"
+        topic = lead.get("tags", [""])[0] if lead.get("tags") else "business"
+
+        body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }}
+  .container {{ max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
+  .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 32px 24px; text-align: center; }}
+  .header h1 {{ color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }}
+  .header p {{ color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }}
+  .content {{ padding: 32px 24px; }}
+  .greeting {{ font-size: 16px; color: #1a1a2e; margin-bottom: 20px; }}
+  .body-text {{ font-size: 15px; color: #4a4a68; line-height: 1.7; margin-bottom: 20px; }}
+  .highlight-box {{ background: #f8f9ff; border-left: 4px solid #667eea; padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 24px 0; }}
+  .highlight-box p {{ margin: 0; color: #4a4a68; font-size: 14px; }}
+  .cta-button {{ display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff !important; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 20px 0; }}
+  .signature {{ margin-top: 32px; padding-top: 24px; border-top: 1px solid #eee; }}
+  .signature-name {{ font-size: 16px; color: #1a1a2e; font-weight: 600; margin-bottom: 4px; }}
+  .signature-title {{ font-size: 13px; color: #888; }}
+  .footer {{ text-align: center; padding: 20px; color: #999; font-size: 12px; background: #fafafa; }}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>OpenClaw AI Agent</h1>
+    <p>Automated Lead Generation & Customer Acquisition</p>
+  </div>
+  <div class="content">
+    <p class="greeting">Hi {name},</p>
+
+    <p class="body-text">
+      {msg.opening_line} I've been following your content and was impressed by your approach to {topic}.
+    </p>
+
+    <div class="highlight-box">
+      <p><strong>What we do:</strong><br>
+      {msg.value_proposition}</p>
+    </div>
+
+    <p class="body-text">
+      I'd love to share how we've helped companies in the {topic} space scale their operations. {msg.call_to_action}
+    </p>
+
+    <center>
+      <a href="#" class="cta-button">Schedule a Quick Call</a>
+    </center>
+
+    <div class="signature">
+      <p class="signature-name">{self.from_name if hasattr(self, 'from_name') else 'OpenClaw Team'}</p>
+      <p class="signature-title">Growth Specialist, OpenClaw AI</p>
+    </div>
+  </div>
+  <div class="footer">
+    <p>You're receiving this because you opted in via our website or subscribed to our newsletter.<br>
+    To unsubscribe, <a href="#">click here</a>.</p>
+  </div>
+</div>
+</body>
+</html>
+"""
+        return body
+
+    async def _generate_linkedin_message(
+        self,
+        lead: Dict,
+        name: str,
+        topic: str,
+        company: str,
+        tone: str
+    ) -> OutreachMessage:
+        """生成 LinkedIn 消息"""
+        import random
+
+        openings = [
+            f"Hi {name}, I noticed your work in the {topic} space.",
+            f"Hi {name}! Impressive work you've been doing in {topic}.",
+            f"Hi {name}, your content on {topic} caught my attention."
+        ]
+
+        value_props = [
+            "We help B2B companies automate their lead generation and outreach.",
+            "Our AI platform has helped similar businesses 3x their qualified leads.",
+            "Just thought you might find value in how we're helping companies scale."
+        ]
+
+        ctas = [
+            "Open to a quick chat?",
+            "Worth a brief call if you're interested.",
+            "Let me know if you'd like to learn more!"
+        ]
+
+        msg = OutreachMessage(
+            channel="linkedin",
+            opening_line=random.choice(openings),
+            value_proposition=random.choice(value_props),
+            call_to_action=random.choice(ctas),
+            tone=tone,
+            estimated_response_rate=0.25  # LinkedIn typically has higher response rates
+        )
+
+        # LinkedIn 短消息
+        msg.body = f"{msg.opening_line} {msg.value_proposition} {msg.call_to_action}"
+
+        return msg
+
+    async def _generate_twitter_message(
+        self,
+        lead: Dict,
+        name: str,
+        topic: str,
+        tone: str
+    ) -> OutreachMessage:
+        """生成 Twitter/X 消息"""
+        # Twitter 限制 280 字符
+        import random
+
+        openings = [
+            f"Hi @{lead.get('username', '').replace('@', '')}, loved your content on {topic}!",
+            f"Impressive work on {topic}! We help companies like yours scale.",
+        ]
+
+        bodies = [
+            f"We've helped B2B companies 3x their leads. Worth a chat?",
+            f"Similar companies have seen great results. Interested in learning more?",
+        ]
+
+        msg = OutreachMessage(
+            channel="twitter",
+            opening_line=random.choice(openings),
+            value_proposition=random.choice(bodies),
+            call_to_action="DM me or reply below!",
+            tone=tone,
+            estimated_response_rate=0.05  # Twitter has lower conversion
+        )
+
+        # 组合推文
+        full_tweet = f"{msg.opening_line} {msg.value_proposition} {msg.call_to_action}"
+        # 截断到 280 字符
+        msg.body = full_tweet[:280] if len(full_tweet) > 280 else full_tweet
+
+        return msg
+
+    def generate_campaign_report(
+        self,
+        leads: List[Dict],
+        outreach_results: Dict,
+        campaign_id: str = ""
+    ) -> CampaignReport:
+        """
+        生成营销活动报告
+
+        Args:
+            leads: 已评分的线索列表
+            outreach_results: 触达执行结果
+            campaign_id: 活动ID
+
+        Returns:
+            CampaignReport: 结构化的活动报告
+        """
+        # 统计各层级线索
+        segments = {"A": [], "B": [], "C": []}
+        for lead in leads:
+            tier = lead.get("tier", "C")
+            if tier in segments:
+                segments[tier].append(lead)
+
+        summary = {
+            "total_leads": len(leads),
+            "tier_a_count": len(segments["A"]),
+            "tier_b_count": len(segments["B"]),
+            "tier_c_count": len(segments["C"]),
+            "average_score": sum(l.get("lead_score", 0) for l in leads) / len(leads) if leads else 0,
+            "total_outreach": outreach_results.get("total", 0) if outreach_results else 0,
+            "total_sent": outreach_results.get("sent", 0) if outreach_results else 0,
+        }
+
+        # 生成推荐
+        recommendations = []
+        if summary["tier_a_count"] > 0:
+            recommendations.append(f"Priority outreach to {summary['tier_a_count']} Tier-A leads with highest conversion potential")
+        if summary["average_score"] < 50:
+            recommendations.append("Consider broadening keywords to attract higher-quality leads")
+        if outreach_results.get("failed", 0) > outreach_results.get("sent", 1) * 0.1:
+            recommendations.append("Email deliverability may need attention - check sender reputation")
+
+        # 生成各层级的示例消息
+        sample_messages = []
+        for tier in ["A", "B", "C"]:
+            tier_lead = segments[tier][0] if segments[tier] else None
+            if tier_lead:
+                # 同步生成示例消息
+                msg = self._generate_sample_message_sync(tier_lead, "email", "professional")
+                sample_messages.append(msg)
+
+        return CampaignReport(
+            campaign_id=campaign_id or datetime.now().strftime("%Y%m%d%H%M%S"),
+            generated_at=datetime.now().isoformat(),
+            summary=summary,
+            lead_segments=segments,
+            outreach_messages=sample_messages,
+            recommendations=recommendations,
+            metrics={
+                "expected_response_rate": sum(m.estimated_response_rate for m in sample_messages) / len(sample_messages) if sample_messages else 0,
+                "estimated_conversions": int(summary.get("total_outreach", 0) * 0.1)
+            }
+        )
+
+    def _generate_sample_message_sync(self, lead: Dict, channel: str, tone: str) -> OutreachMessage:
+        """同步生成示例消息（用于报告）"""
+        name = lead.get("username", "").split()[0] if lead.get("username") else "there"
+        topic = lead.get("tags", [""])[0] if lead.get("tags") else "business"
+        tier = lead.get("tier", "B")
+
+        if channel == "email":
+            subject = f"Quick question about {topic}"
+
+            if tier == "A":
+                body = f"""Hi {name},
+
+I've been following your work in the {topic} space and I'm impressed by your approach.
+
+We help B2B companies like yours automate lead generation and customer acquisition. Companies similar to yours have achieved:
+• 3x increase in qualified leads
+• 45% reduction in acquisition costs
+• 24/7 automated outreach
+
+Would you be open to a 20-minute call this week to explore if there's a potential fit?
+
+Best regards,
+OpenClaw Team"""
+
+            else:
+                body = f"""Hi {name},
+
+I noticed your work in the {topic} space. We help companies automate their outreach and lead generation.
+
+Would you be interested in learning more?
+
+Best,
+OpenClaw Team"""
+
+            return OutreachMessage(
+                channel="email",
+                subject=subject,
+                body=body,
+                call_to_action="Schedule a call" if tier == "A" else "Learn more",
+                tone=tone,
+                estimated_response_rate=0.15 if tier == "A" else 0.08
+            )
+
+        return OutreachMessage(channel=channel, body="Sample message", tone=tone)
+
 
 # Standalone execution
 async def execute_marketing_task(task: dict) -> Dict:
     """Execute marketing workflow"""
     agent = MarketingAgent()
     return await agent.run(task)
+
+
+def generate_marketing_report(leads: List[Dict], outreach_results: Dict, campaign_id: str = "") -> Dict:
+    """Generate a marketing campaign report (sync version for API responses)"""
+    agent = MarketingAgent()
+    report = agent.generate_campaign_report(leads, outreach_results, campaign_id)
+    return {
+        "campaign_id": report.campaign_id,
+        "generated_at": report.generated_at,
+        "summary": report.summary,
+        "lead_segments": {
+            "A_count": len(report.lead_segments.get("A", [])),
+            "B_count": len(report.lead_segments.get("B", [])),
+            "C_count": len(report.lead_segments.get("C", []))
+        },
+        "recommendations": report.recommendations,
+        "metrics": report.metrics
+    }
 
 
 marketing_agent = MarketingAgent

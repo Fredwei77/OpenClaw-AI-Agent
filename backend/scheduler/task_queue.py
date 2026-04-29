@@ -620,28 +620,51 @@ class TaskQueue:
         """动态加载 Agent 执行器"""
         try:
             agent_map = {
-                "LeadAgent": "agents.lead_agent.lead_agent",
-                "LinkedInAgent": "agents.linkedin_agent.linkedin_agent",
-                "FacebookAgent": "agents.facebook_agent.facebook_agent",
-                "TwitterAgent": "agents.twitter_agent.twitter_agent",
-                "EmailAgent": "agents.email_agent.email_agent",
-                "CommentAgent": "agents.comment_agent.comment_agent",
-                "MarketingAgent": "agents.marketing_agent.marketing_agent",
-                "ReportAgent": "agents.report_agent.report_agent",
+                "LeadAgent": ("agents.lead_agent.lead_agent", "LeadAgent"),
+                "LinkedInAgent": ("agents.linkedin_agent.linkedin_agent", "LinkedInAgent"),
+                "FacebookAgent": ("agents.facebook_agent.facebook_agent", "FacebookAgent"),
+                "TwitterAgent": ("agents.twitter_agent.twitter_agent", "TwitterAgent"),
+                "EmailAgent": ("agents.email_agent.email_agent", "EmailAgent"),
+                "CommentAgent": ("agents.comment_agent.comment_agent", "CommentAgent"),
+                "MarketingAgent": ("agents.marketing_agent.marketing_agent", "MarketingAgent"),
+                "ReportAgent": ("agents.report_agent.report_agent", "ReportAgent"),
+                "DataAgent": ("agents.data_agent.data_agent", "DataAgent"),
+                "ShopifyAgent": ("agents.shopify_agent.shopify_agent", "ShopifyAgent"),
+                "AdsAgent": ("agents.ads_agent.ads_agent", "AdsAgent"),
+                "TikTokAgent": ("agents.tiktok_agent.tiktok_agent", "TikTokAgent"),
             }
 
             if agent_name not in agent_map:
+                print(f"[TaskQueue] No executor mapping for agent: {agent_name}")
                 return None
 
-            module_path = agent_map[agent_name]
-            from importlib import import_module
+            module_path, class_name = agent_map[agent_name]
 
-            # 简化处理：直接返回 None 让系统知道没有这个 agent
-            # 实际实现时需要完善各个 agent
-            return None
+            # 动态导入模块
+            from importlib import import_module
+            module = import_module(module_path)
+            agent_class = getattr(module, class_name)
+
+            # 获取全局 browser_manager 和 db
+            sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+            from browser_cluster.manager.browser_manager import browser_manager
+            from backend.db import get_db_pool
+
+            # 创建 agent 实例
+            db = await get_db_pool()
+            agent = agent_class(browser_manager=browser_manager, db=db)
+
+            # 返回异步执行器包装
+            async def executor(payload: Dict) -> Any:
+                return await agent.run(payload)
+
+            print(f"[TaskQueue] Loaded executor for: {agent_name}")
+            return executor
 
         except Exception as e:
             print(f"[TaskQueue] Failed to load executor for {agent_name}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     async def get_status(self) -> Dict:

@@ -33,6 +33,11 @@ class ScrapeRequest(BaseModel):
     use_proxy: bool = False  # 是否使用代理
     store_domain: Optional[str] = None  # Shopify 店铺域名（如 mystore.myshopify.com）
     cookies: Optional[Dict[str, str]] = None  # 可选的登录态 Cookie
+    # 扩展过滤参数
+    geography: str = "all"  # 目标地区: all, us, uk, ca, au, de, fr, jp, sg
+    follower_range: str = "all"  # 粉丝规模: all, 0-1k, 1k-10k, 10k-50k, 50k-100k, 100k+
+    content_type: str = "all"  # 账号类型: all, influencer, business, creator, reseller
+    max_results: int = 50  # 最大结果数量
 
 
 class TaskSubmitRequest(BaseModel):
@@ -102,15 +107,18 @@ async def get_agents():
     """List all available agents"""
     return {
         "agents": [
-            {"name": "LeadAgent", "status": "operational", "platforms": ["twitter", "x", "linkedin", "facebook"]},
+            {"name": "LeadAgent", "status": "operational", "platforms": ["twitter", "x", "linkedin", "tiktok", "facebook", "instagram", "shopify"]},
             {"name": "LinkedInAgent", "status": "placeholder", "platforms": ["linkedin"]},
             {"name": "FacebookAgent", "status": "placeholder", "platforms": ["facebook"]},
             {"name": "TwitterAgent", "status": "placeholder", "platforms": ["twitter", "x"]},
+            {"name": "TikTokAgent", "status": "operational", "platforms": ["tiktok"]},
             {"name": "EmailAgent", "status": "placeholder", "platforms": ["email"]},
             {"name": "CommentAgent", "status": "placeholder", "platforms": ["twitter", "linkedin", "facebook"]},
             {"name": "MarketingAgent", "status": "placeholder", "platforms": ["all"]},
             {"name": "ReportAgent", "status": "placeholder", "platforms": ["all"]},
             {"name": "DataAgent", "status": "placeholder", "platforms": ["all"]},
+            {"name": "ShopifyAgent", "status": "placeholder", "platforms": ["shopify"]},
+            {"name": "AdsAgent", "status": "placeholder", "platforms": ["facebook", "google"]},
         ]
     }
 
@@ -193,6 +201,169 @@ async def submit_task(request: TaskSubmitRequest, background_tasks: BackgroundTa
 # ========================
 # Scrape Test (with Browser Pool)
 # ========================
+
+def _match_geography(lead: dict, geo: str) -> bool:
+    """根据地区过滤线索"""
+    # 地区映射：关键词匹配
+    geo_keywords = {
+        "us": ["usa", "united states", "america", "us ", " u.s."],
+        "uk": ["uk", "united kingdom", "britain", "london"],
+        "ca": ["canada", "toronto", "vancouver"],
+        "au": ["australia", "sydney", "melbourne"],
+        "de": ["germany", "deutschland", "berlin"],
+        "fr": ["france", "paris", "français"],
+        "jp": ["japan", "tokyo", "日本語"],
+        "sg": ["singapore", "sg", "singaporean"],
+    }
+    geo_tags = lead.get("tags", [])
+    username = lead.get("username", "").lower()
+    profile_url = lead.get("profile_url", "").lower()
+
+    if geo not in geo_keywords:
+        return True
+
+    keywords = geo_keywords[geo]
+    for tag in geo_tags:
+        tag_lower = tag.lower()
+        for kw in keywords:
+            if kw in tag_lower:
+                return True
+    for kw in keywords:
+        if kw in username or kw in profile_url:
+            return True
+    return False
+
+
+def _match_follower_range(lead: dict, follower_range: str) -> bool:
+    """根据粉丝规模过滤线索"""
+    followers = lead.get("followers", 0)
+    range_map = {
+        "0-1k": (0, 1000),
+        "1k-10k": (1000, 10000),
+        "10k-50k": (10000, 50000),
+        "50k-100k": (50000, 100000),
+        "100k+": (100000, float("inf")),
+    }
+    if follower_range not in range_map:
+        return True
+    low, high = range_map[follower_range]
+    return low <= followers < high
+
+
+def _match_content_type(lead: dict, content_type: str) -> bool:
+    """根据账号类型过滤线索"""
+    if content_type == "all":
+        return True
+    tags = [t.lower() for t in lead.get("tags", [])]
+    if content_type == "influencer":
+        return any(t in tags for t in ["influencer", "kOL", "creator", "verified", "expert"])
+    elif content_type == "business":
+        return any(t in tags for t in ["business", "company", "brand", "store", "shop"])
+    elif content_type == "creator":
+        return any(t in tags for t in ["creator", "content", "youtuber", "streamer"])
+    elif content_type == "reseller":
+        return any(t in tags for t in ["reseller", "wholesale", "dropship", "supplier"])
+    return True
+
+
+async def _scrape_tiktok(page, keyword: str) -> list:
+    """Scrape TikTok for user profiles matching keyword"""
+    import urllib.parse
+    leads = []
+    encoded_keyword = urllib.parse.quote(keyword)
+
+    try:
+        url = f"https://www.tiktok.com/search/user?keyword={encoded_keyword}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+        # Wait for results
+        try:
+            await page.wait_for_selector('[data-e2e="search-user-item"]', timeout=8000)
+        except Exception:
+            print("[API] TikTok: waiting for results timeout")
+
+        # Extract user cards
+        user_cells = await page.query_selector_all('[data-e2e="search-user-item"]')
+        for cell in user_cells[:20]:
+            try:
+                username_elem = await cell.query_selector('a')
+                name_elem = await cell.query_selector('[data-e2e="search-user-name"]')
+
+                username = await username_elem.text_content() if username_elem else ""
+                href = await username_elem.get_attribute('href') if username_elem else ""
+                name = await name_elem.text_content() if name_elem else ""
+
+                if username and href:
+                    profile_url = href if href.startswith('http') else f"https://www.tiktok.com{href}"
+                    username = username.strip().replace('@', '')
+
+                    leads.append({
+                        "platform": "tiktok",
+                        "username": username or name,
+                        "profile_url": profile_url,
+                        "email": None,
+                        "followers": 0,
+                        "tags": [keyword, "tiktok"]
+                    })
+            except Exception as e:
+                continue
+
+        print(f"[API] TikTok: extracted {len(leads)} users")
+
+    except Exception as e:
+        print(f"[API] TikTok: error: {e}")
+
+    return leads
+
+
+async def _scrape_facebook(page, keyword: str) -> list:
+    """Scrape Facebook for pages/groups matching keyword"""
+    import urllib.parse
+    leads = []
+    encoded_keyword = urllib.parse.quote(keyword)
+
+    try:
+        # Search for pages
+        url = f"https://www.facebook.com/search/pages?q={encoded_keyword}"
+        await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+        # Try to wait for results
+        try:
+            await page.wait_for_selector('[role="article"]', timeout=8000)
+        except Exception:
+            print("[API] Facebook: waiting for results timeout")
+
+        # Extract page cards
+        articles = await page.query_selector_all('[role="article"]')
+        for article in articles[:20]:
+            try:
+                link_elem = await article.query_selector('a')
+                name_elem = await article.query_selector('span')
+
+                name = await name_elem.text_content() if name_elem else ""
+                href = await link_elem.get_attribute('href') if link_elem else ""
+
+                if name and href:
+                    profile_url = href if href.startswith('http') else f"https://www.facebook.com{href}"
+
+                    leads.append({
+                        "platform": "facebook",
+                        "username": name.strip(),
+                        "profile_url": profile_url,
+                        "email": None,
+                        "followers": 0,
+                        "tags": [keyword, "facebook", "page"]
+                    })
+            except Exception:
+                continue
+
+        print(f"[API] Facebook: extracted {len(leads)} pages")
+
+    except Exception as e:
+        print(f"[API] Facebook: error: {e}")
+
+    return leads
+
 
 async def _scrape_twitter(page, keyword: str) -> list:
     """Scrape Twitter/X for user profiles matching keyword"""
@@ -714,11 +885,25 @@ async def test_scraper(request: ScrapeRequest):
                 leads = await _scrape_google(page, request.keyword)
             elif platform == "directory":
                 leads = await _scrape_public_directory(page, request.keyword)
+            elif platform == "tiktok":
+                leads = await _scrape_tiktok(page, request.keyword)
+            elif platform == "facebook":
+                leads = await _scrape_facebook(page, request.keyword)
             else:
                 # 未知平台，返回 mock
                 pass
 
             await page.close()
+
+            # 应用扩展参数过滤
+            if request.geography != "all":
+                leads = [l for l in leads if _match_geography(l, request.geography)]
+            if request.follower_range != "all":
+                leads = [l for l in leads if _match_follower_range(l, request.follower_range)]
+            if request.content_type != "all":
+                leads = [l for l in leads if _match_content_type(l, request.content_type)]
+            if request.max_results > 0 and len(leads) > request.max_results:
+                leads = leads[:request.max_results]
 
             # 如果没有真实数据，返回增强的 mock 数据
             if not leads:

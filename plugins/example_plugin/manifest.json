@@ -1,5 +1,21 @@
 {
   "name": "example_plugin",
   "version": "1.0",
-  "permissions": ["browser"]
+  "description": "示例插件 - 演示插件系统功能",
+  "author": "OpenClaw Team",
+  "permissions": ["browser", "filesystem"],
+  "tools": [
+    {
+      "name": "hello_world",
+      "description": "输出Hello World问候"
+    },
+    {
+      "name": "process_data",
+      "description": "处理输入数据"
+    },
+    {
+      "name": "get_platform_info",
+      "description": "获取目标平台信息"
+    }
+  ]
 }

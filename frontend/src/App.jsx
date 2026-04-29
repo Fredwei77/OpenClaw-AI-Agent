@@ -193,6 +193,90 @@ function App() {
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [webhookSuccess, setWebhookSuccess] = useState(false);
 
+  // Lead Scraper Extended Params
+  const [selectedGeo, setSelectedGeo] = useState('all');
+  const [selectedFollowers, setSelectedFollowers] = useState('all');
+  const [selectedContentType, setSelectedContentType] = useState('all');
+  const [maxResults, setMaxResults] = useState(50);
+
+  // Dashboard Tab Data
+  const dashboardQuickActions = [
+    { labelZh: '部署线索提取器', labelEn: 'Deploy Extractor', icon: <Search size={18} />, color: 'var(--primary)', tab: 'leads' },
+    { labelZh: '启动营销引擎', labelEn: 'Launch Marketing', icon: <Send size={18} />, color: 'var(--accent)', tab: 'marketing' },
+    { labelZh: '执行技能模块', labelEn: 'Run Skill Module', icon: <Sparkles size={18} />, color: '#8b5cf6', tab: 'skills' },
+    { labelZh: '管理插件生态', labelEn: 'Manage Plugins', icon: <Blocks size={18} />, color: 'var(--success)', tab: 'plugins' },
+  ];
+  const dashboardSystemLogs = [
+    { time: '12:07:02', msg: lang === 'zh' ? '[系统] FastAPI 服务已就绪，监听 0.0.0.0:8000' : '[System] FastAPI ready on 0.0.0.0:8000', type: 'success' },
+    { time: '12:06:58', msg: lang === 'zh' ? '[代理] Marketing LLM 插件已加载 (v2.0)' : '[Agent] Marketing LLM Plugin loaded (v2.0)', type: 'info' },
+    { time: '12:06:55', msg: lang === 'zh' ? '[系统] 数据库连接池初始化，最大并发: 10' : '[System] DB pool init, max_conn: 10', type: 'info' },
+    { time: '12:06:50', msg: lang === 'zh' ? '[系统] 加载环境变量完成' : '[System] Env variables loaded', type: 'success' },
+    { time: '12:06:48', msg: lang === 'zh' ? '[系统] 启动 Uvicorn 服务器...' : '[System] Starting Uvicorn server...', type: 'info' },
+  ];
+  const dashboardAgents = [
+    { nameZh: '线索提取特工', nameEn: 'Lead Extractor', status: 'idle', descZh: '等待任务部署', descEn: 'Awaiting deployment', color: 'var(--text-muted)' },
+    { nameZh: '营销文案智能体', nameEn: 'Marketing Copywriter', status: 'active', descZh: '就绪，等待触发', descEn: 'Ready, awaiting trigger', color: 'var(--success)' },
+    { nameZh: 'LLM 路由核心', nameEn: 'LLM Router', status: 'active', descZh: '已连接 OpenRouter', descEn: 'Connected to OpenRouter', color: 'var(--success)' },
+  ];
+
+  // Leads Tab Data
+  const leadsPlatforms = [
+    { value: 'x', labelZh: 'X / Twitter', labelEn: 'X / Twitter', descZh: '从推特话题与用户中挖掘线索', descEn: 'Mine leads from tweets & profiles', color: '#1d9bf0', icon: <Globe size={20} /> },
+    { value: 'linkedin', labelZh: 'LinkedIn', labelEn: 'LinkedIn', descZh: '从职业网络圈中定向抓取联系人', descEn: 'Target professional network contacts', color: '#0a66c2', icon: <Users size={20} /> },
+    { value: 'shopify', labelZh: 'Shopify', labelEn: 'Shopify', descZh: '扫描 Shopify 独立站获取店主信息', descEn: 'Scan Shopify stores for owner data', color: '#96bf48', icon: <Box size={20} /> },
+    { value: 'tiktok', labelZh: 'TikTok', labelEn: 'TikTok', descZh: '从 TikTok 创作者中识别商机', descEn: 'Identify creators & opportunities', color: '#ff0050', icon: <Globe size={20} /> },
+    { value: 'facebook', labelZh: 'Facebook', labelEn: 'Facebook', descZh: '从群组与主页中提取潜客', descEn: 'Extract leads from groups & pages', color: '#1877f2', icon: <Users size={20} /> },
+  ];
+  const leadsGeographies = [
+    { value: 'all', labelZh: '全球', labelEn: 'Global' },
+    { value: 'us', labelZh: '美国', labelEn: 'United States' },
+    { value: 'uk', labelZh: '英国', labelEn: 'United Kingdom' },
+    { value: 'ca', labelZh: '加拿大', labelEn: 'Canada' },
+    { value: 'au', labelZh: '澳大利亚', labelEn: 'Australia' },
+    { value: 'de', labelZh: '德国', labelEn: 'Germany' },
+    { value: 'fr', labelZh: '法国', labelEn: 'France' },
+    { value: 'jp', labelZh: '日本', labelEn: 'Japan' },
+    { value: 'sg', labelZh: '新加坡', labelEn: 'Singapore' },
+  ];
+  const leadsFollowerRanges = [
+    { value: '0-1k', labelZh: '0 - 1K', labelEn: '0 - 1K' },
+    { value: '1k-10k', labelZh: '1K - 10K', labelEn: '1K - 10K' },
+    { value: '10k-50k', labelZh: '10K - 50K', labelEn: '10K - 50K' },
+    { value: '50k-100k', labelZh: '50K - 100K', labelEn: '50K - 100K' },
+    { value: '100k+', labelZh: '100K+', labelEn: '100K+' },
+  ];
+  const leadsContentTypes = [
+    { value: 'all', labelZh: '全部', labelEn: 'All' },
+    { value: 'influencer', labelZh: '影响者', labelEn: 'Influencers' },
+    { value: 'business', labelZh: '商业账号', labelEn: 'Business' },
+    { value: 'creator', labelZh: '创作者', labelEn: 'Creators' },
+    { value: 'reseller', labelZh: '经销商', labelEn: 'Resellers' },
+  ];
+
+  // Marketing Tab Data
+  const marketingActions = [
+    { type: 'email', icon: <Bot size={24} />, color: 'var(--primary)', glow: 'rgba(99,102,241,0.3)', nameZh: '生成个性化开发信', nameEn: 'Generate Cold Email', descZh: '基于客户线索深度定制一封高质量业务开发邮件', descEn: 'Craft a high-quality cold email from lead data', tagZh: '邮件', tagEn: 'Email' },
+    { type: 'classify', icon: <Search size={24} />, color: 'var(--accent)', glow: 'rgba(249,115,22,0.3)', nameZh: '批量潜在客户分类', nameEn: 'Batch Lead Scoring', descZh: '使用 AI 对线索意向度评分并分类归档', descEn: 'Score and categorize leads by intent level', tagZh: '评分', tagEn: 'Scoring' },
+    { type: 'social', icon: <Sparkles size={24} />, color: 'var(--success)', glow: 'rgba(16,185,129,0.3)', nameZh: 'AI 社交媒体跟进', nameEn: 'AI Social Follow-up', descZh: '生成 Twitter/LinkedIn 高互动跟进私信模板', descEn: 'Generate high-engagement DM templates', tagZh: '社交', tagEn: 'Social' },
+  ];
+  const marketingCampaigns = [
+    { nameZh: '健身器材商家拓客行动', nameEn: 'Fitness Equipment Outreach', statsZh: '已发送 142 封 · 打开率 34%', statsEn: 'Sent 142 · Open 34%', status: 'done', pct: 100 },
+    { nameZh: 'Shopify 独立站站长邀约', nameEn: 'Shopify Store Owner Invites', statsZh: '已触达 58 人 · 回复 12 人', statsEn: 'Reached 58 · Replies 12', status: 'running', pct: 62 },
+    { nameZh: 'SaaS 工具订阅推广', nameEn: 'SaaS Tool Subscription Drive', statsZh: '排队中 · 待发送 230 封', statsEn: 'Queued · 230 emails pending', status: 'queued', pct: 0 },
+  ];
+  const marketingStatusStyle = { done: { bg: 'rgba(16,185,129,0.15)', color: 'var(--success)', border: 'rgba(16,185,129,0.35)' }, running: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', border: 'rgba(59,130,246,0.35)' }, queued: { bg: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', border: 'rgba(255,255,255,0.1)' } };
+
+  // Skills Tab Data
+  const skillsAllSkills = [
+    { id: 's1', nameZh: '文案多语言翻译', nameEn: 'Multi-lang Translate', descZh: '一键调用 LLM 技能，将营销文案翻译至多国语言。', descEn: 'Translate marketing copy into multiple languages instantly.', color: 'var(--success)', icon: 'Bot', tag: 'NLP' },
+    { id: 's2', nameZh: '深度竞品分析', nameEn: 'Deep Competitor Analysis', descZh: '根据线索自动生成竞品画像与市场趋势结构化研报。', descEn: 'Auto-generate competitor profiles and market trend reports from leads.', color: '#3b82f6', icon: 'Search', tag: 'Research' },
+    { id: 's3', nameZh: '邮件主题行优化', nameEn: 'Subject Line Optimizer', descZh: 'AI 生成 10 条高打开率的邮件主题行，适配不同行业场景。', descEn: 'Generate 10 high-open-rate email subject lines tailored to your niche.', color: 'var(--accent)', icon: 'Send', tag: 'Email' },
+    { id: 's4', nameZh: '领英触达话术生成', nameEn: 'LinkedIn Outreach Script', descZh: '为指定目标潜客生成领英私信初触脚本，针对性强。', descEn: 'Draft personalized LinkedIn DM scripts for target leads.', color: '#8b5cf6', icon: 'Bot', tag: 'Social' },
+    { id: 's5', nameZh: 'A/B 测试变体生成', nameEn: 'A/B Variant Generator', descZh: '为现有营销文案生成多个 A/B 测试版本，助力转化率实验。', descEn: 'Generate multiple A/B test variants of any marketing copy.', color: 'var(--primary)', icon: 'Sparkles', tag: 'CRO' },
+    { id: 's6', nameZh: '线索数据清洗', nameEn: 'Lead Data Scrubber', descZh: '自动识别并去除重复、无效或低质量线索条目。', descEn: 'Auto-detect and remove duplicate or low-quality lead entries.', color: '#f59e0b', icon: 'Activity', tag: 'Data' },
+  ];
+  const skillsIconMap = { Bot: <Bot size={20} />, Search: <Search size={20} />, Send: <Send size={20} />, Sparkles: <Sparkles size={20} />, Activity: <Activity size={20} /> };
+
   // Analytics State (from backend)
   const [analyticsData, setAnalyticsData] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -347,7 +431,11 @@ function App() {
           },
           body: JSON.stringify({
             keyword: keyword,
-            platform: platform || 'x'
+            platform: platform || 'x',
+            geography: selectedGeo,
+            follower_range: selectedFollowers,
+            content_type: selectedContentType,
+            max_results: maxResults
           })
         }
       );
@@ -689,26 +777,7 @@ function App() {
         </header>
 
         <div className="content-body">
-          {activeTab === 'dashboard' && (() => {
-            const quickActions = [
-              { labelZh: '部署线索提取器', labelEn: 'Deploy Extractor', icon: <Search size={18} />, color: 'var(--primary)', tab: 'leads' },
-              { labelZh: '启动营销引擎', labelEn: 'Launch Marketing', icon: <Send size={18} />, color: 'var(--accent)', tab: 'marketing' },
-              { labelZh: '执行技能模块', labelEn: 'Run Skill Module', icon: <Sparkles size={18} />, color: '#8b5cf6', tab: 'skills' },
-              { labelZh: '管理插件生态', labelEn: 'Manage Plugins', icon: <Blocks size={18} />, color: 'var(--success)', tab: 'plugins' },
-            ];
-            const systemLogs = [
-              { time: '12:07:02', msg: lang === 'zh' ? '[系统] FastAPI 服务已就绪，监听 0.0.0.0:8000' : '[System] FastAPI ready on 0.0.0.0:8000', type: 'success' },
-              { time: '12:06:58', msg: lang === 'zh' ? '[代理] Marketing LLM 插件已加载 (v2.0)' : '[Agent] Marketing LLM Plugin loaded (v2.0)', type: 'info' },
-              { time: '12:06:55', msg: lang === 'zh' ? '[系统] 数据库连接池初始化，最大并发: 10' : '[System] DB pool init, max_conn: 10', type: 'info' },
-              { time: '12:06:50', msg: lang === 'zh' ? '[系统] 加载环境变量完成' : '[System] Env variables loaded', type: 'success' },
-              { time: '12:06:48', msg: lang === 'zh' ? '[系统] 启动 Uvicorn 服务器...' : '[System] Starting Uvicorn server...', type: 'info' },
-            ];
-            const agents = [
-              { nameZh: '线索提取特工', nameEn: 'Lead Extractor', status: 'idle', descZh: '等待任务部署', descEn: 'Awaiting deployment', color: 'var(--text-muted)' },
-              { nameZh: '营销文案智能体', nameEn: 'Marketing Copywriter', status: 'active', descZh: '就绪，等待触发', descEn: 'Ready, awaiting trigger', color: 'var(--success)' },
-              { nameZh: 'LLM 路由核心', nameEn: 'LLM Router', status: 'active', descZh: '已连接 OpenRouter', descEn: 'Connected to OpenRouter', color: 'var(--success)' },
-            ];
-            return (
+          {activeTab === 'dashboard' && (
               <>
                 {/* ── Row 1: Stat Cards ── */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
@@ -739,7 +808,7 @@ function App() {
                       {lang === 'zh' ? '快捷操作' : 'Quick Actions'}
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                      {quickActions.map((a, i) => (
+                      {dashboardQuickActions.map((a, i) => (
                         <button key={i} onClick={() => setActiveTab(a.tab)} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.75rem 1rem', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: '0.5rem', cursor: 'pointer', color: '#fff', fontFamily: 'inherit', fontSize: '0.9rem', fontWeight: 500, transition: 'all 0.2s', textAlign: 'left' }}
                           onMouseOver={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.07)'; e.currentTarget.style.borderColor = a.color + '55'; }}
                           onMouseOut={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'; }}
@@ -760,7 +829,7 @@ function App() {
                       <span style={{ marginLeft: 'auto', width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', boxShadow: '0 0 8px var(--success)', display: 'inline-block' }} />
                     </h3>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
-                      {systemLogs.map((log, i) => (
+                      {dashboardSystemLogs.map((log, i) => (
                         <div key={i} style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start', padding: '0.55rem 0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', borderLeft: `3px solid ${log.type === 'success' ? 'var(--success)' : 'var(--primary)'}` }}>
                           <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontFamily: 'monospace', flexShrink: 0, paddingTop: '0.05rem' }}>{log.time}</span>
                           <span style={{ fontSize: '0.83rem', color: log.type === 'success' ? '#a7f3d0' : 'var(--text-muted)', fontFamily: 'monospace', lineHeight: 1.4 }}>{log.msg}</span>
@@ -777,7 +846,7 @@ function App() {
                     {lang === 'zh' ? 'Agent 运行状态' : 'Agent Status'}
                   </h3>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
-                    {agents.map((agent, i) => (
+                    {dashboardAgents.map((agent, i) => (
                       <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.9rem 1.1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
                         <div style={{ width: 10, height: 10, borderRadius: '50%', background: agent.color, boxShadow: `0 0 8px ${agent.color}`, flexShrink: 0 }} />
                         <div>
@@ -792,58 +861,159 @@ function App() {
                   </div>
                 </div>
               </>
-            );
-          })()}
+            )}
 
+          {activeTab === 'leads' && (
+            <>
+              {/* ── Top Control Panel ── */}
+              <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                <h2 className="panel-title" style={{ marginBottom: '1.25rem' }}>
+                  <Search size={20} className="brand-icon" />
+                  {lang === 'zh' ? '目标捕获参数' : 'Target Acquisition Parameters'}
+                </h2>
 
-          {activeTab === 'leads' && (() => {
-            const platforms = [
-              { value: 'x', labelZh: 'X / Twitter', labelEn: 'X / Twitter', descZh: '从推特话题与用户中挖掘线索', descEn: 'Mine leads from tweets & profiles', color: '#1d9bf0', icon: <Globe size={20} /> },
-              { value: 'linkedin', labelZh: 'LinkedIn', labelEn: 'LinkedIn', descZh: '从职业网络圈中定向抓取联系人', descEn: 'Target professional network contacts', color: '#0a66c2', icon: <Users size={20} /> },
-              { value: 'shopify', labelZh: 'Shopify', labelEn: 'Shopify', descZh: '扫描 Shopify 独立站获取店主信息', descEn: 'Scan Shopify stores for owner data', color: '#96bf48', icon: <Box size={20} /> },
-            ];
-            const isError = statusMsg.includes('[Error]') || statusMsg.includes('[错误]');
-            return (
-              <>
-                {/* ── Top Control Panel ── */}
-                <div className="glass-panel" style={{ padding: '1.5rem' }}>
-                  <h2 className="panel-title" style={{ marginBottom: '1.25rem' }}>
-                    <Search size={20} className="brand-icon" />
-                    {lang === 'zh' ? '目标捕获参数' : 'Target Acquisition Parameters'}
-                  </h2>
-
-                  {/* Platform Cards */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '0.75rem', marginBottom: '1.25rem' }}>
-                    {platforms.map(p => (
-                      <div key={p.value} onClick={() => setPlatform(p.value)} style={{ padding: '0.9rem 1rem', borderRadius: '0.6rem', border: `2px solid ${platform === p.value ? p.color : 'rgba(255,255,255,0.08)'}`, background: platform === p.value ? `${p.color}18` : 'rgba(255,255,255,0.02)', cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                {/* Platform Cards */}
+                <div style={{ marginBottom: '1rem' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                    {lang === 'zh' ? '▼ 目标平台' : '▼ Target Platform'}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '0.5rem' }}>
+                    {leadsPlatforms.map(p => (
+                      <div key={p.value} onClick={() => setPlatform(p.value)} style={{ padding: '0.7rem 0.6rem', borderRadius: '0.5rem', border: `2px solid ${platform === p.value ? p.color : 'rgba(255,255,255,0.06)'}`, background: platform === p.value ? `${p.color}18` : 'rgba(255,255,255,0.02)', cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                         <span style={{ color: platform === p.value ? p.color : 'var(--text-muted)', flexShrink: 0 }}>{p.icon}</span>
-                        <div>
-                          <div style={{ color: platform === p.value ? '#fff' : 'var(--text-muted)', fontWeight: 600, fontSize: '0.9rem' }}>{lang === 'zh' ? p.labelZh : p.labelEn}</div>
-                          <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: '0.15rem' }}>{lang === 'zh' ? p.descZh : p.descEn}</div>
+                        <div style={{ overflow: 'hidden' }}>
+                          <div style={{ color: platform === p.value ? '#fff' : 'var(--text-muted)', fontWeight: 600, fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{lang === 'zh' ? p.labelZh : p.labelEn}</div>
                         </div>
-                        {platform === p.value && <span style={{ marginLeft: 'auto', width: 8, height: 8, borderRadius: '50%', background: p.color, boxShadow: `0 0 8px ${p.color}`, flexShrink: 0 }} />}
+                        {platform === p.value && <span style={{ width: 6, height: 6, borderRadius: '50%', background: p.color, boxShadow: `0 0 6px ${p.color}`, flexShrink: 0 }} />}
                       </div>
                     ))}
                   </div>
-
-                  {/* Keyword Input + Button */}
-                  <div style={{ display: 'flex', gap: '0.75rem' }}>
-                    <div style={{ flex: 1, position: 'relative' }}>
-                      <Search size={16} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
-                      <input
-                        type="text"
-                        className="input-field"
-                        placeholder={lang === 'zh' ? '输入垂直领域关键词 (例: 健身器材)' : 'Enter niche keyword (e.g. fitness equipment)'}
-                        value={keyword}
-                        onChange={e => setKeyword(e.target.value)}
-                        onKeyDown={e => { if (e.key === 'Enter' && !isScraping) handleScrape(); }}
-                        style={{ width: '100%', paddingLeft: '2.5rem', boxSizing: 'border-box' }}
-                      />
+                </div>
+                  {/* Keyword Input */}
+                  <div style={{ marginBottom: '1rem' }}>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      {lang === 'zh' ? '▼ 关键词 / Niche Keyword' : '▼ Keyword / Niche'}
                     </div>
-                    <button className="btn" onClick={handleScrape} disabled={isScraping} style={{ minWidth: '160px', padding: '0 1.5rem', gap: '0.5rem', background: isScraping ? 'rgba(99,102,241,0.2)' : 'var(--primary)', color: '#fff', fontWeight: 600 }}>
+                    <div style={{ display: 'flex', gap: '0.75rem' }}>
+                      <div style={{ flex: 1, position: 'relative' }}>
+                        <Search size={16} style={{ position: 'absolute', left: '1rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+                        <input
+                          type="text"
+                          className="input-field"
+                          placeholder={lang === 'zh' ? '输入垂直领域关键词 (例: fitness equipment)' : 'Enter niche keyword (e.g. fitness equipment)'}
+                          value={keyword}
+                          onChange={e => setKeyword(e.target.value)}
+                          onKeyDown={e => { if (e.key === 'Enter' && !isScraping) handleScrape(); }}
+                          style={{ width: '100%', paddingLeft: '2.5rem', boxSizing: 'border-box' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Extended Parameters Row */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
+                    {/* Geographic Filter */}
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {lang === 'zh' ? '▼ 目标地区' : '▼ Geography'}
+                      </div>
+                      <select
+                        value={selectedGeo}
+                        onChange={e => setSelectedGeo(e.target.value)}
+                        className="input-field"
+                        style={{ width: '100%', padding: '0.6rem 0.8rem', fontSize: '0.82rem' }}
+                      >
+                        {leadsGeographies.map(g => (
+                          <option key={g.value} value={g.value}>{lang === 'zh' ? g.labelZh : g.labelEn}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Follower Range */}
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {lang === 'zh' ? '▼ 粉丝规模' : '▼ Followers'}
+                      </div>
+                      <select
+                        value={selectedFollowers}
+                        onChange={e => setSelectedFollowers(e.target.value)}
+                        className="input-field"
+                        style={{ width: '100%', padding: '0.6rem 0.8rem', fontSize: '0.82rem' }}
+                      >
+                        {leadsFollowerRanges.map(f => (
+                          <option key={f.value} value={f.value}>{lang === 'zh' ? f.labelZh : f.labelEn}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Content Type */}
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {lang === 'zh' ? '▼ 账号类型' : '▼ Account Type'}
+                      </div>
+                      <select
+                        value={selectedContentType}
+                        onChange={e => setSelectedContentType(e.target.value)}
+                        className="input-field"
+                        style={{ width: '100%', padding: '0.6rem 0.8rem', fontSize: '0.82rem' }}
+                      >
+                        {leadsContentTypes.map(c => (
+                          <option key={c.value} value={c.value}>{lang === 'zh' ? c.labelZh : c.labelEn}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Max Results */}
+                    <div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.4rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                        {lang === 'zh' ? '▼ 最大数量' : '▼ Max Results'}
+                      </div>
+                      <select
+                        value={maxResults}
+                        onChange={e => setMaxResults(parseInt(e.target.value))}
+                        className="input-field"
+                        style={{ width: '100%', padding: '0.6rem 0.8rem', fontSize: '0.82rem' }}
+                      >
+                        <option value={10}>10</option>
+                        <option value={25}>25</option>
+                        <option value={50}>50</option>
+                        <option value={100}>100</option>
+                        <option value={200}>200</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Deploy Button */}
+                  <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+                    <button className="btn" onClick={handleScrape} disabled={isScraping} style={{ minWidth: '180px', padding: '0 1.5rem', gap: '0.5rem', background: isScraping ? 'rgba(99,102,241,0.2)' : 'var(--primary)', color: '#fff', fontWeight: 600 }}>
                       {isScraping ? <Loader2 size={16} className="loading-spinner" /> : <Search size={16} />}
                       {isScraping ? (lang === 'zh' ? '挖掘中...' : 'Mining...') : (lang === 'zh' ? '部署提取器' : 'Deploy Extractor')}
                     </button>
+
+                    {/* Current Params Summary */}
+                    {!isScraping && keyword && (
+                      <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(99,102,241,0.15)', color: 'var(--primary)' }}>
+                          {leadsPlatforms.find(p => p.value === platform)?.labelEn || platform}
+                        </span>
+                        <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(16,185,129,0.12)', color: 'var(--success)' }}>
+                          "{keyword}"
+                        </span>
+                        {selectedGeo !== 'all' && (
+                          <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}>
+                            {leadsGeographies.find(g => g.value === selectedGeo)?.labelEn}
+                          </span>
+                        )}
+                        {selectedFollowers !== 'all' && (
+                          <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(139,92,246,0.12)', color: '#8b5cf6' }}>
+                            {selectedFollowers}
+                          </span>
+                        )}
+                        <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)' }}>
+                          max {maxResults}
+                        </span>
+                      </div>
+                    )}
                   </div>
 
                   {/* Status / Progress bar */}
@@ -853,17 +1023,17 @@ function App() {
                         <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--primary), #8b5cf6)', borderRadius: 99, animation: 'progressPulse 1.5s ease-in-out infinite', width: '60%' }} />
                       </div>
                       <p style={{ fontSize: '0.82rem', color: 'var(--primary)', marginTop: '0.5rem', fontFamily: 'monospace' }}>
-                        {lang === 'zh' ? `正在扫描 ${platforms.find(p2 => p2.value === platform)?.labelZh || platform} · ${keyword}` : `Scanning ${platform} for "${keyword}"...`}
+                        {lang === 'zh' ? `正在扫描 ${leadsPlatforms.find(p2 => p2.value === platform)?.labelZh || platform} · ${keyword}` : `Scanning ${platform} for "${keyword}"...`}
                       </p>
                     </div>
                   )}
 
                   {statusMsg && !isScraping && (
-                    <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'flex-start', gap: '0.6rem', padding: '0.7rem 1rem', background: isError ? 'rgba(239,68,68,0.08)' : 'rgba(16,185,129,0.08)', borderRadius: '0.5rem', border: `1px solid ${isError ? 'rgba(239,68,68,0.25)' : 'rgba(16,185,129,0.25)'}` }}>
-                      <span style={{ color: isError ? '#f87171' : 'var(--success)', flexShrink: 0, marginTop: '0.05rem' }}>
-                        {isError ? <Activity size={14} /> : <Activity size={14} />}
+                    <div style={{ marginTop: '1rem', display: 'flex', alignItems: 'flex-start', gap: '0.6rem', padding: '0.7rem 1rem', background: statusMsg.includes('[Error]') || statusMsg.includes('[错误]') ? 'rgba(239,68,68,0.08)' : 'rgba(16,185,129,0.08)', borderRadius: '0.5rem', border: `1px solid ${statusMsg.includes('[Error]') || statusMsg.includes('[错误]') ? 'rgba(239,68,68,0.25)' : 'rgba(16,185,129,0.25)'}` }}>
+                      <span style={{ color: statusMsg.includes('[Error]') || statusMsg.includes('[错误]') ? '#f87171' : 'var(--success)', flexShrink: 0, marginTop: '0.05rem' }}>
+                        <Activity size={14} />
                       </span>
-                      <span style={{ fontSize: '0.85rem', color: isError ? '#fca5a5' : '#a7f3d0', fontFamily: 'monospace' }}>{statusMsg}</span>
+                      <span style={{ fontSize: '0.85rem', color: statusMsg.includes('[Error]') || statusMsg.includes('[错误]') ? '#fca5a5' : '#a7f3d0', fontFamily: 'monospace' }}>{statusMsg}</span>
                     </div>
                   )}
                 </div>
@@ -944,49 +1114,21 @@ function App() {
                   )}
                 </div>
               </>
-            );
-          })()}
+            )}
 
-          
-          {activeTab === 'marketing' && (() => {
-            const actions = [
-              {
-                type: 'email', icon: <Bot size={24} />, color: 'var(--primary)', glow: 'rgba(99,102,241,0.3)',
-                nameZh: '生成个性化开发信', nameEn: 'Generate Cold Email',
-                descZh: '基于客户线索深度定制一封高质量业务开发邮件', descEn: 'Craft a high-quality cold email from lead data',
-                tagZh: '邮件', tagEn: 'Email'
-              },
-              {
-                type: 'classify', icon: <Search size={24} />, color: 'var(--accent)', glow: 'rgba(249,115,22,0.3)',
-                nameZh: '批量潜在客户分类', nameEn: 'Batch Lead Scoring',
-                descZh: '使用 AI 对线索意向度评分并分类归档', descEn: 'Score and categorize leads by intent level',
-                tagZh: '评分', tagEn: 'Scoring'
-              },
-              {
-                type: 'social', icon: <Sparkles size={24} />, color: 'var(--success)', glow: 'rgba(16,185,129,0.3)',
-                nameZh: 'AI 社交媒体跟进', nameEn: 'AI Social Follow-up',
-                descZh: '生成 Twitter/LinkedIn 高互动跟进私信模板', descEn: 'Generate high-engagement DM templates',
-                tagZh: '社交', tagEn: 'Social'
-              },
-            ];
-            const campaigns = [
-              { nameZh: '健身器材商家拓客行动', nameEn: 'Fitness Equipment Outreach', statsZh: '已发送 142 封 · 打开率 34%', statsEn: 'Sent 142 · Open 34%', status: 'done', pct: 100 },
-              { nameZh: 'Shopify 独立站站长邀约', nameEn: 'Shopify Store Owner Invites', statsZh: '已触达 58 人 · 回复 12 人', statsEn: 'Reached 58 · Replies 12', status: 'running', pct: 62 },
-              { nameZh: 'SaaS 工具订阅推广', nameEn: 'SaaS Tool Subscription Drive', statsZh: '排队中 · 待发送 230 封', statsEn: 'Queued · 230 emails pending', status: 'queued', pct: 0 },
-            ];
-            const statusStyle = { done: { bg: 'rgba(16,185,129,0.15)', color: 'var(--success)', border: 'rgba(16,185,129,0.35)' }, running: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', border: 'rgba(59,130,246,0.35)' }, queued: { bg: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', border: 'rgba(255,255,255,0.1)' } };
-            return (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                {/* ── Row 1: Two columns ── */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '1rem' }}>
-                  {/* Left: Action Cards */}
-                  <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                    <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>
-                      <Send size={18} className="brand-icon" />
-                      {lang === 'zh' ? 'AI 营销动作' : 'AI Marketing Actions'}
-                    </h2>
-                    {actions.map(a => (
-                      <button key={a.type} onClick={() => handleMarketingAction(a.type)} disabled={marketingLoading}
+
+          {activeTab === 'marketing' && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {/* ── Row 1: Two columns ── */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: '1rem' }}>
+                {/* Left: Action Cards */}
+                <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  <h2 className="panel-title" style={{ marginBottom: '0.5rem' }}>
+                    <Send size={18} className="brand-icon" />
+                    {lang === 'zh' ? 'AI 营销动作' : 'AI Marketing Actions'}
+                  </h2>
+                  {marketingActions.map(a => (
+                    <button key={a.type} onClick={() => handleMarketingAction(a.type)} disabled={marketingLoading}
                         style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem 1.1rem', background: marketingLoading ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.2)', border: `1px solid rgba(255,255,255,0.07)`, borderRadius: '0.6rem', cursor: marketingLoading ? 'not-allowed': 'pointer', fontFamily: 'inherit', transition: 'all 0.2s', textAlign: 'left', opacity: marketingLoading ? 0.6 : 1, position: 'relative', overflow: 'hidden' }}
                         onMouseOver={e => { if (!marketingLoading) { e.currentTarget.style.borderColor = a.color + '55'; e.currentTarget.style.background = `${a.glow.replace('0.3', '0.08')}`; }}}
                         onMouseOut={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'; e.currentTarget.style.background = 'rgba(0,0,0,0.2)'; }}
@@ -1048,8 +1190,8 @@ function App() {
                     {lang === 'zh' ? '近期营销活动' : 'Recent Campaigns'}
                   </h3>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                    {campaigns.map((c, i) => {
-                      const s = statusStyle[c.status];
+                    {marketingCampaigns.map((c, i) => {
+                      const s = marketingStatusStyle[c.status];
                       return (
                         <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.85rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
@@ -1074,26 +1216,23 @@ function App() {
                   </div>
                 </div>
               </div>
-            );
-          })()}
+            )}
 
 
 
-          {activeTab === 'plugins' && (() => {
-            const activeCount = filteredPlugins.filter(p => p.isActive).length;
-            return (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                {/* ── Header Row ── */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
-                  <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '1.6rem', fontWeight: 700, color: '#fff' }}>{filteredPlugins.length}</span>
-                      <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{lang === 'zh' ? '已安装\n插件' : 'Installed\nPlugins'}</span>
-                    </div>
-                    <div style={{ width: 1, height: 32, background: 'rgba(255,255,255,0.1)' }} />
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '1.6rem', fontWeight: 700, color: 'var(--success)' }}>{activeCount}</span>
-                      <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{lang === 'zh' ? '已激活' : 'Active'}</span>
+          {activeTab === 'plugins' && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+              {/* ── Header Row ── */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem' }}>
+                <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '1.6rem', fontWeight: 700, color: '#fff' }}>{filteredPlugins.length}</span>
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{lang === 'zh' ? '已安装\n插件' : 'Installed\nPlugins'}</span>
+                  </div>
+                  <div style={{ width: 1, height: 32, background: 'rgba(255,255,255,0.1)' }} />
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '1.6rem', fontWeight: 700, color: 'var(--success)' }}>{filteredPlugins.filter(p => p.isActive).length}</span>
+                    <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.3 }}>{lang === 'zh' ? '已激活' : 'Active'}</span>
                     </div>
                   </div>
                   <div style={{ position: 'relative', width: 280 }}>
@@ -1142,8 +1281,7 @@ function App() {
                   </div>
                 </div>
               </div>
-            );
-          })()}
+            )}
 
 
           {activeTab === 'analytics' && (() => {
@@ -1283,21 +1421,12 @@ function App() {
 
 
           {activeTab === 'skills' && (() => {
-            const allSkills = [
-              { id: 's1', nameZh: '文案多语言翻译', nameEn: 'Multi-lang Translate', descZh: '一键调用 LLM 技能，将营销文案翻译至多国语言。', descEn: 'Translate marketing copy into multiple languages instantly.', color: 'var(--success)', icon: 'Bot', tag: 'NLP' },
-              { id: 's2', nameZh: '深度竞品分析', nameEn: 'Deep Competitor Analysis', descZh: '根据线索自动生成竞品画像与市场趋势结构化研报。', descEn: 'Auto-generate competitor profiles and market trend reports from leads.', color: '#3b82f6', icon: 'Search', tag: 'Research' },
-              { id: 's3', nameZh: '邮件主题行优化', nameEn: 'Subject Line Optimizer', descZh: 'AI 生成 10 条高打开率的邮件主题行，适配不同行业场景。', descEn: 'Generate 10 high-open-rate email subject lines tailored to your niche.', color: 'var(--accent)', icon: 'Send', tag: 'Email' },
-              { id: 's4', nameZh: '领英触达话术生成', nameEn: 'LinkedIn Outreach Script', descZh: '为指定目标潜客生成领英私信初触脚本，针对性强。', descEn: 'Draft personalized LinkedIn DM scripts for target leads.', color: '#8b5cf6', icon: 'Bot', tag: 'Social' },
-              { id: 's5', nameZh: 'A/B 测试变体生成', nameEn: 'A/B Variant Generator', descZh: '为现有营销文案生成多个 A/B 测试版本，助力转化率实验。', descEn: 'Generate multiple A/B test variants of any marketing copy.', color: 'var(--primary)', icon: 'Sparkles', tag: 'CRO' },
-              { id: 's6', nameZh: '线索数据清洗', nameEn: 'Lead Data Scrubber', descZh: '自动识别并去除重复、无效或低质量线索条目。', descEn: 'Auto-detect and remove duplicate or low-quality lead entries.', color: '#f59e0b', icon: 'Activity', tag: 'Data' },
-            ];
             const q = skillSearchQuery.toLowerCase();
-            const filtered = allSkills.filter(s =>
+            const filtered = skillsAllSkills.filter(s =>
               (lang === 'zh' ? s.nameZh : s.nameEn).toLowerCase().includes(q) ||
               (lang === 'zh' ? s.descZh : s.descEn).toLowerCase().includes(q) ||
               s.tag.toLowerCase().includes(q)
             );
-            const iconMap = { Bot: <Bot size={20} />, Search: <Search size={20} />, Send: <Send size={20} />, Sparkles: <Sparkles size={20} />, Activity: <Activity size={20} /> };
             return (
               <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 {/* Header row */}
@@ -1321,7 +1450,7 @@ function App() {
                 </div>
                 {/* Sub-description */}
                 <div style={{ marginTop: '0.75rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                  {lang === 'zh' ? `共 ${filtered.length} / ${allSkills.length} 个技能可用` : `${filtered.length} / ${allSkills.length} skills available`}
+                  {lang === 'zh' ? `共 ${filtered.length} / ${skillsAllSkills.length} 个技能可用` : `${filtered.length} / ${skillsAllSkills.length} skills available`}
                 </div>
                 {/* Skill cards grid */}
                 <div className="stats-grid" style={{ marginTop: '1.5rem' }}>
@@ -1332,7 +1461,7 @@ function App() {
                     >
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span style={{ color: skill.color }}>{iconMap[skill.icon] || <Blocks size={20} />}</span>
+                          <span style={{ color: skill.color }}>{skillsIconMap[skill.icon] || <Blocks size={20} />}</span>
                           <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '0.95rem' }}>{lang === 'zh' ? skill.nameZh : skill.nameEn}</span>
                         </div>
                         <span style={{ fontSize: '0.72rem', fontWeight: 600, padding: '0.15rem 0.55rem', borderRadius: '1rem', background: 'rgba(255,255,255,0.07)', color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.1)', letterSpacing: '0.05em' }}>{skill.tag}</span>

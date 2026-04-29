@@ -91,77 +91,207 @@ class EmailAgent(BaseAgent):
         self.templates = self._load_default_templates()
 
     def _load_default_templates(self) -> Dict[str, Dict]:
-        """加载默认邮件模板"""
+        """加载默认邮件模板 - 现代化专业设计"""
         return {
             "cold_outreach": {
                 "subject": "Quick question about {company}",
                 "body_html": """
-                    <html>
-                    <body>
-                    <p>Hi {name},</p>
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }
+  .container { max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 32px 24px; text-align: center; }
+  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+  .header p { color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }
+  .content { padding: 32px 24px; }
+  .greeting { font-size: 16px; color: #1a1a2e; margin-bottom: 20px; }
+  .body-text { font-size: 15px; color: #4a4a68; line-height: 1.7; margin-bottom: 20px; }
+  .highlight-box { background: #f8f9ff; border-left: 4px solid #667eea; padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .highlight-box p { margin: 0; color: #4a4a68; font-size: 14px; }
+  .cta-button { display: inline-block; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff !important; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 20px 0; }
+  .signature { margin-top: 32px; padding-top: 24px; border-top: 1px solid #eee; }
+  .signature-name { font-size: 16px; color: #1a1a2e; font-weight: 600; margin-bottom: 4px; }
+  .signature-title { font-size: 13px; color: #888; }
+  .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; background: #fafafa; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>OpenClaw AI Agent</h1>
+    <p>Automated Lead Generation & Customer Acquisition</p>
+  </div>
+  <div class="content">
+    <p class="greeting">Hi {name},</p>
 
-                    <p>I noticed your work on {topic} and I was impressed by your approach.</p>
+    <p class="body-text">
+      I noticed your work in the <strong>{topic}</strong> space, and I've been following your content on how you're helping businesses like yours scale their operations.
+    </p>
 
-                    <p>I'm reaching out because we help companies like {company} with lead generation
-                    and customer acquisition. We recently helped a similar business increase their
-                    qualified leads by 3x.</p>
+    <div class="highlight-box">
+      <p><strong>What we do:</strong><br>
+      We help B2B companies like yours automate lead generation and customer acquisition. Our AI-powered system has helped businesses achieve:</p>
+      <ul style="margin: 12px 0 0; padding-left: 20px; color: #4a4a68; font-size: 14px;">
+        <li>3x increase in qualified leads</li>
+        <li>45% reduction in customer acquisition cost</li>
+        <li>24/7 automated outreach</li>
+      </ul>
+    </div>
 
-                    <p>Would you be open to a quick 15-minute call this week to explore if there's
-                    a potential fit?</p>
+    <p class="body-text">
+      I'd love to share how we've helped similar companies in the <strong>{company}</strong> space. Would you be open to a brief 15-minute call this week?
+    </p>
 
-                    <p>Best regards,<br>
-                    {sender_name}</p>
-                    </body>
-                    </html>
+    <center>
+      <a href="#" class="cta-button">Schedule a Quick Call</a>
+    </center>
+
+    <div class="signature">
+      <p class="signature-name">{sender_name}</p>
+      <p class="signature-title">Growth Specialist, OpenClaw AI</p>
+    </div>
+  </div>
+  <div class="footer">
+    <p>You're receiving this because you subscribed to our newsletter or opted in via our website.<br>
+    To unsubscribe, <a href="#">click here</a>.</p>
+  </div>
+</div>
+</body>
+</html>
                 """,
                 "variables": ["name", "company", "topic", "sender_name"]
             },
             "follow_up": {
                 "subject": "Following up on my previous email - {topic}",
                 "body_html": """
-                    <html>
-                    <body>
-                    <p>Hi {name},</p>
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }
+  .container { max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .header { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); padding: 32px 24px; text-align: center; }
+  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+  .header p { color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }
+  .content { padding: 32px 24px; }
+  .greeting { font-size: 16px; color: #1a1a2e; margin-bottom: 20px; }
+  .body-text { font-size: 15px; color: #4a4a68; line-height: 1.7; margin-bottom: 20px; }
+  .reminder-box { background: #fff5f7; border-left: 4px solid #f5576c; padding: 16px 20px; border-radius: 0 8px 8px 0; margin: 24px 0; }
+  .reminder-box p { margin: 0; color: #4a4a68; font-size: 14px; }
+  .cta-button { display: inline-block; background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: #fff !important; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 20px 0; }
+  .signature { margin-top: 32px; padding-top: 24px; border-top: 1px solid #eee; }
+  .signature-name { font-size: 16px; color: #1a1a2e; font-weight: 600; margin-bottom: 4px; }
+  .signature-title { font-size: 13px; color: #888; }
+  .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; background: #fafafa; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Just Following Up</h1>
+    <p>Hope you had a chance to see my previous message</p>
+  </div>
+  <div class="content">
+    <p class="greeting">Hi {name},</p>
 
-                    <p>I wanted to follow up on my previous email about {topic}.</p>
+    <p class="body-text">
+      I wanted to quickly follow up on my previous email about <strong>{topic}</strong>. I understand you're busy, so I'll keep this brief.
+    </p>
 
-                    <p>I understand you're busy, so I'll keep this brief. If you're not interested,
-                    no worries at all - just let me know and I'll stop reaching out.</p>
+    <div class="reminder-box">
+      <p><strong>Key points from before:</strong></p>
+      <ul style="margin: 12px 0 0; padding-left: 20px; color: #4a4a68; font-size: 14px;">
+        <li>We help companies automate lead generation</li>
+        <li>3x increase in qualified leads for similar businesses</li>
+        <li>No commitment needed for an initial chat</li>
+      </ul>
+    </div>
 
-                    <p>However, if you are curious about how we can help with lead generation,
-                    I'd love to schedule a quick call.</p>
+    <p class="body-text">
+      If you're not interested, no worries at all — just let me know and I'll stop reaching out. But if you're curious about how we can help scale <strong>{company}</strong>, I'd love to connect.
+    </p>
 
-                    <p>Best,<br>
-                    {sender_name}</p>
-                    </body>
-                    </html>
+    <center>
+      <a href="#" class="cta-button">Let's Chat</a>
+    </center>
+
+    <div class="signature">
+      <p class="signature-name">{sender_name}</p>
+      <p class="signature-title">Growth Specialist, OpenClaw AI</p>
+    </div>
+  </div>
+  <div class="footer">
+    <p>To unsubscribe from future emails, <a href="#">click here</a>.</p>
+  </div>
+</div>
+</body>
+</html>
                 """,
-                "variables": ["name", "topic", "sender_name"]
+                "variables": ["name", "topic", "sender_name", "company"]
             },
             "meeting_request": {
                 "subject": "Meeting request: {topic}",
                 "body_html": """
-                    <html>
-                    <body>
-                    <p>Hi {name},</p>
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }
+  .container { max-width: 600px; margin: 20px auto; background: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  .header { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); padding: 32px 24px; text-align: center; }
+  .header h1 { color: #ffffff; margin: 0; font-size: 22px; font-weight: 600; }
+  .header p { color: rgba(255,255,255,0.85); margin: 8px 0 0; font-size: 14px; }
+  .content { padding: 32px 24px; }
+  .greeting { font-size: 16px; color: #1a1a2e; margin-bottom: 20px; }
+  .body-text { font-size: 15px; color: #4a4a68; line-height: 1.7; margin-bottom: 20px; }
+  .time-slots { background: #f0f9ff; border-radius: 12px; padding: 20px; margin: 24px 0; }
+  .time-slots h3 { margin: 0 0 16px; color: #1a1a2e; font-size: 16px; }
+  .time-slot { display: block; padding: 12px 16px; background: #fff; border-radius: 8px; margin-bottom: 8px; color: #4a4a68; font-size: 14px; border: 1px solid #e0f0ff; }
+  .time-slot:last-child { margin-bottom: 0; }
+  .cta-button { display: inline-block; background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: #fff !important; text-decoration: none; padding: 14px 28px; border-radius: 8px; font-weight: 600; font-size: 15px; margin: 20px 0; }
+  .signature { margin-top: 32px; padding-top: 24px; border-top: 1px solid #eee; }
+  .signature-name { font-size: 16px; color: #1a1a2e; font-weight: 600; margin-bottom: 4px; }
+  .signature-title { font-size: 13px; color: #888; }
+  .footer { text-align: center; padding: 20px; color: #999; font-size: 12px; background: #fafafa; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>Let's Connect</h1>
+    <p>I'd love to learn more about your business</p>
+  </div>
+  <div class="content">
+    <p class="greeting">Hi {name},</p>
 
-                    <p>I've been following your work at {company} and I think what you're doing
-                    with {topic} is impressive.</p>
+    <p class="body-text">
+      I've been following your work at <strong>{company}</strong>, and what you're doing with <strong>{topic}</strong> is truly impressive. I'd love to learn more about your current challenges and see if we can help.
+    </p>
 
-                    <p>I'd love to schedule a 20-minute call to learn more about your current
-                    challenges and see if we can help.</p>
+    <div class="time-slots">
+      <h3>Available time slots:</h3>
+      <a href="#" class="time-slot">📅 Monday, 10:00 AM - 12:00 PM</a>
+      <a href="#" class="time-slot">📅 Wednesday, 2:00 PM - 4:00 PM</a>
+      <a href="#" class="time-slot">📅 Friday, 9:00 AM - 11:00 AM</a>
+    </div>
 
-                    <p>Would any of these times work for you?</p>
-                    <ul>
-                        <li>Monday 10am - 12pm</li>
-                        <li>Wednesday 2pm - 4pm</li>
-                        <li>Friday 9am - 11am</li>
-                    </ul>
+    <p class="body-text">
+      Just click on a time slot above to schedule a 20-minute call, or reply with your preferred time and I'll send you a calendar invite.
+    </p>
 
-                    <p>Best regards,<br>
-                    {sender_name}</p>
-                    </body>
-                    </html>
+    <div class="signature">
+      <p class="signature-name">{sender_name}</p>
+      <p class="signature-title">Growth Specialist, OpenClaw AI</p>
+    </div>
+  </div>
+  <div class="footer">
+    <p>If these times don't work, just reply with your availability!</p>
+  </div>
+</div>
+</body>
+</html>
                 """,
                 "variables": ["name", "company", "topic", "sender_name"]
             }
