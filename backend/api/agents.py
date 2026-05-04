@@ -1,20 +1,33 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends
 import os
 import asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any
 from openai import AsyncOpenAI
 import traceback
 
-from browser_cluster.manager.browser_pool import get_browser_pool, init_browser_pool
-from scheduler.task_queue import get_task_queue, TaskPriority, TaskStatus
-from db import update_task_status
+from browser_cluster.manager.browser_pool import get_browser_pool
+from scheduler.task_queue import get_task_queue, TaskPriority
+from .auth import get_current_user
 
 router = APIRouter()
 
 # OpenRouter configuration
-API_KEY = os.getenv("OPENROUTER_API_KEY", "sk-or-v1-your-key-here")
+API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 BASE_URL = "https://openrouter.ai/api/v1"
+
+# Module-level reusable client (created lazily on first use)
+_llm_client: Optional[AsyncOpenAI] = None
+
+
+def _get_llm_client() -> AsyncOpenAI:
+    """Get or create a shared AsyncOpenAI client."""
+    global _llm_client
+    if _llm_client is None:
+        if not API_KEY:
+            raise RuntimeError("OPENROUTER_API_KEY not configured")
+        _llm_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+    return _llm_client
 
 
 # ========================
@@ -67,7 +80,7 @@ async def test_llm(request: ChatRequest):
         }
 
     try:
-        client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+        client = _get_llm_client()
 
         response = await client.chat.completions.create(
             model="meta-llama/llama-3-8b-instruct",
@@ -158,44 +171,60 @@ async def get_queue_status():
 # ========================
 
 @router.post("/submit-task")
-async def submit_task(request: TaskSubmitRequest, background_tasks: BackgroundTasks):
+async def submit_task(
+    request: TaskSubmitRequest,
+    current_user=Depends(get_current_user)
+):
     """
     Submit a task to the queue for async execution.
-    Returns immediately with task ID.
+    Creates a database record and enqueues for immediate execution.
     """
+    import json
+
+    valid_agents = [
+        "LeadAgent", "LinkedInAgent", "FacebookAgent",
+        "TwitterAgent", "EmailAgent", "CommentAgent",
+        "MarketingAgent", "ReportAgent", "DataAgent",
+        "HarnessAgent"
+    ]
+
+    if request.agent_name not in valid_agents:
+        raise HTTPException(status_code=400, detail=f"Invalid agent: {request.agent_name}")
+
     try:
-        # 验证 agent_name
-        valid_agents = [
-            "LeadAgent", "LinkedInAgent", "FacebookAgent",
-            "TwitterAgent", "EmailAgent", "CommentAgent",
-            "MarketingAgent", "ReportAgent", "DataAgent"
-        ]
+        from db import get_db_pool as _get_pool
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """INSERT INTO tasks (agent_name, task_type, payload, status, user_id)
+                   VALUES ($1, $2, $3, 'pending', $4)
+                   RETURNING id""",
+                request.agent_name, request.task_type, json.dumps(request.payload), current_user.id
+            )
 
-        if request.agent_name not in valid_agents:
-            raise HTTPException(status_code=400, detail=f"Invalid agent: {request.agent_name}")
-
-        # 获取任务队列
+        task_db_id = row['id']
         queue = get_task_queue()
-
-        # 创建数据库任务记录
-        # 注意：实际创建需要通过 tasks API 先创建任务记录
-        # 这里简化处理，直接提交到队列
-
-        # 提交任务
-        priority = TaskPriority(request.priority)
-        task_id = f"{request.agent_name}_{request.task_type}_{id(request)}"
-
-        print(f"[API] Task submitted: {request.agent_name}/{request.task_type}")
+        await queue.submit_task(
+            task_id=task_db_id,
+            user_id=current_user.id,
+            agent_name=request.agent_name,
+            task_type=request.task_type,
+            payload=request.payload,
+            priority=TaskPriority(request.priority),
+            platform=request.platform
+        )
 
         return {
             "status": "queued",
             "message": f"Task queued for {request.agent_name}",
-            "task_id": task_id,
+            "task_id": task_db_id,
             "note": "Task will be executed asynchronously. Use /api/tasks/{id} to check status."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=f"Failed to submit task: {str(e)}")
 
 
 # ========================
@@ -305,7 +334,7 @@ async def _scrape_tiktok(page, keyword: str) -> list:
                         "followers": 0,
                         "tags": [keyword, "tiktok"]
                     })
-            except Exception as e:
+            except Exception:
                 continue
 
         print(f"[API] TikTok: extracted {len(leads)} users")
@@ -582,7 +611,7 @@ async def _scrape_instagram(page, keyword: str) -> list:
                     "followers": 0,
                     "tags": [keyword]
                 })
-        except Exception as e:
+        except Exception:
             continue
 
     return leads[:10]
@@ -661,7 +690,7 @@ async def _scrape_shopify(page, keyword: str, store_domain: str = None) -> list:
                             "followers": 0,
                             "tags": [keyword, "product"]
                         })
-                except Exception as e:
+                except Exception:
                     continue
         else:
             for product in products[:15]:
@@ -750,7 +779,7 @@ async def _scrape_google(page, keyword: str) -> list:
                         "followers": 0,
                         "tags": [keyword, "company", domain]
                     })
-            except Exception as e:
+            except Exception:
                 continue
 
         print(f"[API] Google: extracted {len(leads)} results")
@@ -800,7 +829,7 @@ async def _scrape_public_directory(page, keyword: str) -> list:
                         "followers": 0,
                         "tags": [keyword, "business", phone.strip() if phone else ""]
                     })
-            except Exception as e:
+            except Exception:
                 continue
 
         print(f"[API] Directory: extracted {len(leads)} listings")
@@ -855,7 +884,6 @@ async def test_scraper(request: ScrapeRequest):
         try:
             # 使用 Playwright Stealth 避免被检测
             from playwright_stealth import Stealth
-            import urllib.parse
 
             page = await context.new_page()
             stealth = Stealth()
@@ -905,55 +933,10 @@ async def test_scraper(request: ScrapeRequest):
             if request.max_results > 0 and len(leads) > request.max_results:
                 leads = leads[:request.max_results]
 
-            # 如果没有真实数据，返回增强的 mock 数据
-            if not leads:
-                print(f"[API] No real data from {platform}, returning enhanced demo data")
-                leads = [
-                    {
-                        "platform": platform,
-                        "username": f"Verified {request.keyword} Official (@{request.keyword.replace(' ', '')}Store)",
-                        "profile_url": f"https://{platform}.com/{request.keyword.replace(' ', '')}",
-                        "email": f"contact@{request.keyword.replace(' ', '').lower()}.com",
-                        "followers": 15000,
-                        "tags": [request.keyword, "verified", "premium"]
-                    },
-                    {
-                        "platform": platform,
-                        "username": f"{request.keyword} Expert Pro (@{request.keyword.replace(' ', '')}Pro)",
-                        "profile_url": f"https://{platform}.com/{request.keyword.replace(' ', '')}Pro",
-                        "email": f"business@{request.keyword.replace(' ', '').lower()}pro.com",
-                        "followers": 8500,
-                        "tags": [request.keyword, "expert", "business"]
-                    },
-                    {
-                        "platform": platform,
-                        "username": f"Global {request.keyword} Network (@{request.keyword.replace(' ', '')}Global)",
-                        "profile_url": f"https://{platform}.com/{request.keyword.replace(' ', '')}Global",
-                        "email": None,
-                        "followers": 25000,
-                        "tags": [request.keyword, "global", "network"]
-                    },
-                    {
-                        "platform": platform,
-                        "username": f"{request.keyword} Hub Community (@{request.keyword.replace(' ', '')}Hub)",
-                        "profile_url": f"https://{platform}.com/{request.keyword.replace(' ', '')}Hub",
-                        "email": f"hello@{request.keyword.replace(' ', '').lower()}hub.com",
-                        "followers": 12000,
-                        "tags": [request.keyword, "community", "hub"]
-                    },
-                    {
-                        "platform": platform,
-                        "username": f"Premium {request.keyword} Supplies (@{request.keyword.replace(' ', '')}Supply)",
-                        "profile_url": f"https://{platform}.com/{request.keyword.replace(' ', '')}Supply",
-                        "email": f"sales@{request.keyword.replace(' ', '').lower()}supply.com",
-                        "followers": 6800,
-                        "tags": [request.keyword, "supplies", "wholesale"]
-                    }
-                ]
-
-            # 保存到数据库
-            from db import save_leads
-            await save_leads(leads, request.user_id)
+            # 保存真实数据到数据库（跳过空结果，不写入伪造数据）
+            if leads:
+                from db import save_leads
+                await save_leads(leads, request.user_id)
 
             return {
                 "status": "success",
@@ -972,17 +955,14 @@ async def test_scraper(request: ScrapeRequest):
         print(f"[API] Scraping failed: {error_details}")
 
         # 写入错误日志
-        try:
-            with open("error.log", "a", encoding="utf-8") as f:
-                f.write(f"\n[{datetime.now().isoformat()}] Scraping Error:\n{error_details}\n")
-        except:
-            pass
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.error(f"Scraping Error:\n{error_details}")
 
         return {"status": "error", "message": f"Scraping workflow failed: {repr(e)}"}
 
 
 # 需要 datetime
-from datetime import datetime
 
 
 # ========================
@@ -1122,3 +1102,87 @@ async def serpapi_search(request: SerpSearchRequest):
             "status": "error",
             "message": f"SerpAPI search failed: {str(e)}"
         }
+
+
+# ========================
+# Browser Harness Endpoints
+# ========================
+
+class HarnessScrapeRequest(BaseModel):
+    keyword: str = "fitness equipment"
+    platform: str = "x"
+    action: str = "scrape"  # scrape | follow | message | connect | profile
+    username: Optional[str] = None
+    message: Optional[str] = None
+    limit: int = Field(default=20, ge=1, le=100)
+    dry_run: bool = False
+
+
+@router.post("/harness-scrape")
+async def harness_scrape(
+    request: HarnessScrapeRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Execute a browser-harness based task.
+    Connects to the user's real Chrome browser for authenticated scraping and interaction.
+    """
+    from browser_cluster.manager.browser_harness_manager import get_harness_manager
+
+    harness_mgr = await get_harness_manager()
+    if not harness_mgr.is_connected:
+        return {
+            "status": "error",
+            "message": "Browser harness not connected. Ensure Chrome is running with --remote-debugging-port=9222"
+        }
+
+    try:
+        from agents.harness_agent.harness_agent import HarnessAgent
+        agent = HarnessAgent(
+            harness_manager=harness_mgr,
+            db=None,
+            dry_run=request.dry_run,
+        )
+
+        task = {
+            "action": request.action,
+            "platform": request.platform,
+            "keyword": request.keyword,
+            "username": request.username or "",
+            "message": request.message or "",
+            "limit": request.limit,
+            "user_id": current_user.id,
+        }
+
+        result = await agent.run(task)
+
+        # Save leads to database if scraping
+        if result.get("status") == "success" and result.get("data"):
+            try:
+                from db import save_leads
+                await save_leads(result["data"], current_user.id)
+            except Exception as e:
+                print(f"[API] Failed to save harness leads: {e}")
+
+        return result
+
+    except Exception as e:
+        error_details = traceback.format_exc()
+        print(f"[API] Harness scrape failed: {error_details}")
+        return {"status": "error", "message": str(e)}
+
+
+@router.get("/harness-status")
+async def harness_status(current_user=Depends(get_current_user)):
+    """Get browser-harness connection status."""
+    from browser_cluster.manager.browser_harness_manager import get_harness_manager
+    from browser_cluster.harness_launcher import is_debug_port_open, get_ws_debug_url
+
+    harness_mgr = await get_harness_manager()
+    chrome_running = is_debug_port_open()
+
+    return {
+        "harness_connected": harness_mgr.is_connected,
+        "chrome_debug_port": chrome_running,
+        "ws_debug_url": get_ws_debug_url() if chrome_running else None,
+    }

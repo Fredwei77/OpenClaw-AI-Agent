@@ -2,8 +2,6 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
-import asyncpg
-import os
 from .auth import get_db_pool, get_current_user, UserResponse
 
 router = APIRouter()
@@ -147,7 +145,7 @@ async def get_products(
                 product_name=row['product_name'],
                 price=float(row['price']),
                 category=row['category'],
-                rating=float(row['rating']) if row['rating'] else None,
+                rating=float(row['rating']) if row['rating'] is not None else None,
                 user_id=row['user_id'],
                 created_at=row['created_at']
             )
@@ -184,7 +182,7 @@ async def get_product(
             product_name=row['product_name'],
             price=float(row['price']),
             category=row['category'],
-            rating=float(row['rating']) if row['rating'] else None,
+            rating=float(row['rating']) if row['rating'] is not None else None,
             user_id=row['user_id'],
             created_at=row['created_at']
         )

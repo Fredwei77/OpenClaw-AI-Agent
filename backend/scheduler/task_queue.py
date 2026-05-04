@@ -11,10 +11,10 @@ Task Queue and Scheduler System
 """
 
 import asyncio
-import json
 import os
 import sys
-from typing import Dict, List, Optional, Callable, Any
+from collections import deque
+from typing import Dict, Optional, Callable, Any
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -23,7 +23,7 @@ import traceback
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db import update_task_status, get_task
+from db import update_task_status
 
 
 class TaskStatus(str, Enum):
@@ -84,7 +84,7 @@ class RateLimiter:
     def __init__(self, max_requests: int, window_seconds: int = 3600):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.requests: List[datetime] = []
+        self.requests: deque = deque(maxlen=max_requests)
         self._lock = asyncio.Lock()
 
     async def acquire(self) -> bool:
@@ -98,8 +98,9 @@ class RateLimiter:
             now = datetime.now()
             cutoff = now - timedelta(seconds=self.window_seconds)
 
-            # 清理过期的请求记录
-            self.requests = [req_time for req_time in self.requests if req_time > cutoff]
+            # 清理过期的请求记录（从左侧弹出，因为时间有序）
+            while self.requests and self.requests[0] <= cutoff:
+                self.requests.popleft()
 
             if len(self.requests) < self.max_requests:
                 self.requests.append(now)
@@ -113,7 +114,7 @@ class RateLimiter:
             if len(self.requests) < self.max_requests:
                 return 0.0
 
-            oldest = min(self.requests)
+            oldest = self.requests[0]
             next_available = oldest + timedelta(seconds=self.window_seconds)
             wait = (next_available - datetime.now()).total_seconds()
             return max(0.0, wait)
@@ -365,6 +366,7 @@ class TaskQueue:
 
         self._queue: asyncio.PriorityQueue = None
         self._active_tasks: Dict[int, asyncio.Task] = {}
+        self._concurrency_semaphore: Optional[asyncio.Semaphore] = None
         self._rate_limiters: Dict[str, RateLimiter] = {}
         self._redis_rate_limiters: Dict[str, RedisRateLimiter] = {}
         self._redis_client = None
@@ -388,6 +390,7 @@ class TaskQueue:
 
         self._init_queue()
         self._running = True
+        self._concurrency_semaphore = asyncio.Semaphore(self.max_concurrent)
 
         # 尝试连接 Redis
         self._redis_client = await get_redis_client()
@@ -514,12 +517,8 @@ class TaskQueue:
                 except asyncio.TimeoutError:
                     continue
 
-                # 检查并发限制
-                if len(self._active_tasks) >= self.max_concurrent:
-                    # 放回队列，等待有空位
-                    await self._queue.put((priority, task))
-                    await asyncio.sleep(0.1)
-                    continue
+                # 等待并发信号量（非忙等）
+                await self._concurrency_semaphore.acquire()
 
                 # 如果有平台限制，等待速率配额
                 if task.platform:
@@ -612,33 +611,36 @@ class TaskQueue:
                 print(f"[TaskQueue] Task {task.task_id} failed permanently after {task.retry_count} retries")
 
         finally:
-            # 清理活跃任务
+            # 清理活跃任务，释放并发信号量
             if task.task_id in self._active_tasks:
                 del self._active_tasks[task.task_id]
+            self._concurrency_semaphore.release()
+
+    # Agent 模块映射（类常量，避免每次调用重建）
+    AGENT_MAP = {
+        "LeadAgent": ("agents.lead_agent.lead_agent", "LeadAgent"),
+        "LinkedInAgent": ("agents.linkedin_agent.linkedin_agent", "LinkedInAgent"),
+        "FacebookAgent": ("agents.facebook_agent.facebook_agent", "FacebookAgent"),
+        "TwitterAgent": ("agents.twitter_agent.twitter_agent", "TwitterAgent"),
+        "EmailAgent": ("agents.email_agent.email_agent", "EmailAgent"),
+        "CommentAgent": ("agents.comment_agent.comment_agent", "CommentAgent"),
+        "MarketingAgent": ("agents.marketing_agent.marketing_agent", "MarketingAgent"),
+        "ReportAgent": ("agents.report_agent.report_agent", "ReportAgent"),
+        "DataAgent": ("agents.data_agent.data_agent", "DataAgent"),
+        "ShopifyAgent": ("agents.shopify_agent.shopify_agent", "ShopifyAgent"),
+        "AdsAgent": ("agents.ads_agent.ads_agent", "AdsAgent"),
+        "TikTokAgent": ("agents.tiktok_agent.tiktok_agent", "TikTokAgent"),
+        "HarnessAgent": ("agents.harness_agent.harness_agent", "HarnessAgent"),
+    }
 
     async def _load_agent_executor(self, agent_name: str) -> Optional[Callable]:
         """动态加载 Agent 执行器"""
         try:
-            agent_map = {
-                "LeadAgent": ("agents.lead_agent.lead_agent", "LeadAgent"),
-                "LinkedInAgent": ("agents.linkedin_agent.linkedin_agent", "LinkedInAgent"),
-                "FacebookAgent": ("agents.facebook_agent.facebook_agent", "FacebookAgent"),
-                "TwitterAgent": ("agents.twitter_agent.twitter_agent", "TwitterAgent"),
-                "EmailAgent": ("agents.email_agent.email_agent", "EmailAgent"),
-                "CommentAgent": ("agents.comment_agent.comment_agent", "CommentAgent"),
-                "MarketingAgent": ("agents.marketing_agent.marketing_agent", "MarketingAgent"),
-                "ReportAgent": ("agents.report_agent.report_agent", "ReportAgent"),
-                "DataAgent": ("agents.data_agent.data_agent", "DataAgent"),
-                "ShopifyAgent": ("agents.shopify_agent.shopify_agent", "ShopifyAgent"),
-                "AdsAgent": ("agents.ads_agent.ads_agent", "AdsAgent"),
-                "TikTokAgent": ("agents.tiktok_agent.tiktok_agent", "TikTokAgent"),
-            }
-
-            if agent_name not in agent_map:
+            if agent_name not in self.AGENT_MAP:
                 print(f"[TaskQueue] No executor mapping for agent: {agent_name}")
                 return None
 
-            module_path, class_name = agent_map[agent_name]
+            module_path, class_name = self.AGENT_MAP[agent_name]
 
             # 动态导入模块
             from importlib import import_module
@@ -646,13 +648,22 @@ class TaskQueue:
             agent_class = getattr(module, class_name)
 
             # 获取全局 browser_manager 和 db
-            sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))))
+            _project_root = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            if _project_root not in sys.path:
+                sys.path.append(_project_root)
             from browser_cluster.manager.browser_manager import browser_manager
             from backend.db import get_db_pool
 
             # 创建 agent 实例
             db = await get_db_pool()
-            agent = agent_class(browser_manager=browser_manager, db=db)
+
+            # HarnessAgent needs harness_manager
+            if agent_name == "HarnessAgent":
+                from browser_cluster.manager.browser_harness_manager import get_harness_manager
+                harness_mgr = await get_harness_manager()
+                agent = agent_class(browser_manager=browser_manager, db=db, harness_manager=harness_mgr)
+            else:
+                agent = agent_class(browser_manager=browser_manager, db=db)
 
             # 返回异步执行器包装
             async def executor(payload: Dict) -> Any:

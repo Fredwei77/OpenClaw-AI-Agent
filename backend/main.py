@@ -2,6 +2,7 @@ import os
 import sys
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 # Configure structured logging
 logging.basicConfig(
@@ -25,12 +26,88 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from pydantic import ValidationError
 from api import auth, agents, tasks, leads, products, analytics
 from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
 
-app = FastAPI(title="OpenClaw AI Agent API", version="1.0.0", description="Backend API for Cross-Border Ecommerce Agents")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown lifecycle."""
+    # Startup
+    from db import get_db_pool
+    try:
+        await get_db_pool()
+        logger.info("Database pool initialized")
+    except Exception as e:
+        logger.error(f"Database pool initialization failed: {e}")
+
+    try:
+        from browser_cluster.manager.browser_pool import init_browser_pool
+        await init_browser_pool()
+        logger.info("Browser pool initialized")
+    except Exception as e:
+        logger.error(f"Browser pool initialization failed: {e}")
+
+    try:
+        from scheduler.task_queue import init_task_queue
+        await init_task_queue()
+        logger.info("Task queue initialized")
+    except Exception as e:
+        logger.error(f"Task queue initialization failed: {e}")
+
+    # Initialize browser-harness (optional, non-fatal)
+    try:
+        from browser_cluster.manager.browser_harness_manager import init_harness_manager
+        harness_ok = await init_harness_manager()
+        if harness_ok:
+            logger.info("Browser harness initialized")
+        else:
+            logger.info("Browser harness not available (Chrome not running with debug port)")
+    except Exception as e:
+        logger.info(f"Browser harness not available: {e}")
+
+    yield
+
+    # Shutdown
+    from db import close_db_pool
+    try:
+        await close_db_pool()
+        logger.info("Database pool closed")
+    except Exception as e:
+        logger.error(f"Database pool cleanup failed: {e}")
+
+    try:
+        from browser_cluster.manager.browser_pool import shutdown_browser_pool
+        await shutdown_browser_pool()
+        logger.info("Browser pool closed")
+    except Exception as e:
+        logger.error(f"Browser pool cleanup failed: {e}")
+
+    try:
+        from browser_cluster.manager.browser_harness_manager import shutdown_harness_manager
+        await shutdown_harness_manager()
+        logger.info("Browser harness closed")
+    except Exception as e:
+        logger.error(f"Browser harness cleanup failed: {e}")
+
+    try:
+        from scheduler.task_queue import shutdown_task_queue
+        await shutdown_task_queue()
+        logger.info("Task queue closed")
+    except Exception as e:
+        logger.error(f"Task queue cleanup failed: {e}")
+
+    try:
+        from scheduler.task_queue import close_redis_client
+        await close_redis_client()
+        logger.info("Redis client closed")
+    except Exception as e:
+        logger.error(f"Redis client cleanup failed: {e}")
+
+
+app = FastAPI(title="OpenClaw AI Agent API", version="1.0.0", description="Backend API for Cross-Border Ecommerce Agents", lifespan=lifespan)
 
 # CORS configuration - configurable via environment variables
 # For production, set ALLOWED_ORIGINS to specific domains
@@ -41,13 +118,11 @@ allowed_origins = [origin.strip() for origin in _allowed_origins.split(",") if o
 environment = os.getenv("ENVIRONMENT", "development")
 if environment == "development" and "*" not in _allowed_origins:
     # In dev mode, also allow the frontend dev server
-    allowed_origins.extend([
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000"
-    ])
-    allowed_origins = list(set(allowed_origins))  # Remove duplicates
+    _dev_origins = {
+        "http://localhost:5173", "http://localhost:3000",
+        "http://127.0.0.1:5173", "http://127.0.0.1:3000",
+    }
+    allowed_origins = list(set(allowed_origins) | _dev_origins)
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,69 +147,6 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
 app.include_router(products.router, prefix="/api/products", tags=["products"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize resources on startup."""
-    # Import and initialize database pool
-    from db import get_db_pool
-    try:
-        await get_db_pool()
-        logger.info("Database pool initialized")
-    except Exception as e:
-        logger.error(f"Database pool initialization failed: {e}")
-
-    # Import and initialize browser pool
-    try:
-        from browser_cluster.manager.browser_pool import init_browser_pool
-        await init_browser_pool()
-        logger.info("Browser pool initialized")
-    except Exception as e:
-        logger.error(f"Browser pool initialization failed: {e}")
-
-    # Import and initialize task queue
-    try:
-        from scheduler.task_queue import init_task_queue
-        await init_task_queue()
-        logger.info("Task queue initialized")
-    except Exception as e:
-        logger.error(f"Task queue initialization failed: {e}")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup resources on shutdown."""
-    from db import close_db_pool
-    try:
-        await close_db_pool()
-        logger.info("Database pool closed")
-    except Exception as e:
-        logger.error(f"Database pool cleanup failed: {e}")
-
-    # Close browser pool
-    try:
-        from browser_cluster.manager.browser_pool import shutdown_browser_pool
-        await shutdown_browser_pool()
-        logger.info("Browser pool closed")
-    except Exception as e:
-        logger.error(f"Browser pool cleanup failed: {e}")
-
-    # Close task queue
-    try:
-        from scheduler.task_queue import shutdown_task_queue
-        await shutdown_task_queue()
-        logger.info("Task queue closed")
-    except Exception as e:
-        logger.error(f"Task queue cleanup failed: {e}")
-
-    # Close Redis client
-    try:
-        from scheduler.task_queue import close_redis_client
-        await close_redis_client()
-        logger.info("Redis client closed")
-    except Exception as e:
-        logger.error(f"Redis client cleanup failed: {e}")
 
 
 @app.get("/")
@@ -168,8 +180,8 @@ async def metrics():
             browsers=status.get("total_browsers", 0),
             contexts=status.get("total_contexts", 0)
         )
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to update browser pool metrics: {e}")
 
     return Response(
         content=collector.get_metrics(),

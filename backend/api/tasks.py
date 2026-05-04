@@ -1,10 +1,8 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query, BackgroundTasks
 from pydantic import BaseModel, Field
-from typing import Optional, Literal, List, Dict, Any
+from typing import Optional, Literal, List
 from datetime import datetime
-import asyncpg
 import json
-import os
 from .auth import get_db_pool, get_current_user, UserResponse
 from scheduler.task_queue import get_task_queue, TaskPriority
 
@@ -24,7 +22,7 @@ VALID_AGENTS = {
 class TaskCreate(BaseModel):
     agent_name: str = Field(..., min_length=1, max_length=255)
     task_type: Literal["scrape", "comment", "like", "follow", "message", "analytics", "research", "report", "email"]
-    payload: dict = Field(default_factory=dict)
+    payload: dict = Field(default_factory=dict, max_length=65536)
     priority: int = Field(default=1, ge=0, le=3)  # 0=LOW, 1=NORMAL, 2=HIGH, 3=URGENT
 
 
@@ -88,20 +86,20 @@ async def get_tasks(
             if status_filter:
                 if status_filter not in VALID_STATUSES:
                     raise HTTPException(status_code=400, detail=f"Invalid status. Must be one of {VALID_STATUSES}")
-                conditions.append(f"AND status = ${param_idx}")
+                conditions.append(f"status = ${param_idx}")
                 params.append(status_filter)
                 param_idx += 1
 
             if agent_name:
                 escaped = agent_name.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                conditions.append(f"AND agent_name ILIKE ${param_idx}")
+                conditions.append(f"agent_name ILIKE ${param_idx}")
                 params.append(f"%{escaped}%")
                 param_idx += 1
 
             if task_type:
                 if task_type not in VALID_TASK_TYPES:
                     raise HTTPException(status_code=400, detail=f"Invalid task type. Must be one of {VALID_TASK_TYPES}")
-                conditions.append(f"AND task_type = ${param_idx}")
+                conditions.append(f"task_type = ${param_idx}")
                 params.append(task_type)
                 param_idx += 1
 
@@ -186,7 +184,7 @@ async def get_task(
             )
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")
 
 
@@ -244,7 +242,7 @@ async def create_task(
 
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")
 
 
@@ -277,9 +275,9 @@ async def update_task(
 
                 # Update timestamps based on status
                 if update.status == "running":
-                    updates.append(f"started_at = CURRENT_TIMESTAMP")
+                    updates.append("started_at = CURRENT_TIMESTAMP")
                 elif update.status in ("completed", "failed", "cancelled"):
-                    updates.append(f"completed_at = CURRENT_TIMESTAMP")
+                    updates.append("completed_at = CURRENT_TIMESTAMP")
 
             if update.payload is not None:
                 updates.append(f"payload = ${param_idx}")
@@ -312,7 +310,7 @@ async def update_task(
             )
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")
 
 
@@ -338,7 +336,7 @@ async def delete_task(
             await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")
         return None
 
@@ -388,7 +386,7 @@ async def cancel_task(
             )
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")
 
 
@@ -447,5 +445,5 @@ async def retry_task(
             )
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Database error")

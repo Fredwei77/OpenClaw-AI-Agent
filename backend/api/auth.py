@@ -3,9 +3,8 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, Literal
 from datetime import datetime, timedelta
-import asyncpg
 import bcrypt
-from jose import jwt, JWTError
+from jose import jwt
 import os
 from dotenv import load_dotenv
 
@@ -77,7 +76,8 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token."""
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    from datetime import timezone
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -97,17 +97,9 @@ def decode_token(token: str) -> TokenData:
 
 
 async def get_db_pool():
-    """Get or create a database connection pool."""
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        raise ValueError("DATABASE_URL environment variable must be set")
-    return await asyncpg.create_pool(database_url, min_size=2, max_size=10)
-
-
-async def get_db_connection():
-    """Get a database connection from the pool."""
-    pool = await get_db_pool()
-    return pool.acquire()
+    """Get the shared database connection pool from db module."""
+    from db import get_db_pool as _get_shared_pool
+    return await _get_shared_pool()
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserResponse:

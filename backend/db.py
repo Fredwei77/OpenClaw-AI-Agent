@@ -51,8 +51,6 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
     if not leads:
         return 0
 
-    database_url = os.getenv("DATABASE_URL", "postgresql://postgres:openclaw@localhost:5432/openclaw_db")
-
     try:
         pool = await get_db_pool()
     except Exception as e:
@@ -76,20 +74,26 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
                     created_at = CURRENT_TIMESTAMP
             """
 
+            values = [
+                (
+                    user_id,
+                    lead.get('platform', ''),
+                    lead.get('username', ''),
+                    lead.get('profile_url', ''),
+                    lead.get('email', None),
+                    lead.get('followers', 0),
+                    lead.get('tags', [])
+                )
+                for lead in leads
+            ]
+
             async with conn.transaction():
-                for lead in leads:
-                    result = await conn.execute(
-                        query,
-                        user_id,
-                        lead.get('platform', ''),
-                        lead.get('username', ''),
-                        lead.get('profile_url', ''),
-                        lead.get('email', None),
-                        lead.get('followers', 0),
-                        lead.get('tags', [])
-                    )
-                    if result.endswith('1'):
-                        inserted_count += 1
+                result = await conn.executemany(query, values)
+                # executemany returns status string like "INSERT 0 5"
+                if result and 'INSERT' in result:
+                    parts = result.split()
+                    if len(parts) >= 3:
+                        inserted_count = int(parts[2])
 
             print(f"[DB] Successfully upserted {inserted_count} leads to the database.")
     except Exception as e:
@@ -137,8 +141,11 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
             ]
 
             async with conn.transaction():
-                results = await conn.executemany(query, values)
-                inserted_count = sum(1 for r in results if r.endswith('1'))
+                result = await conn.executemany(query, values)
+                if result and 'INSERT' in result:
+                    parts = result.split()
+                    if len(parts) >= 3:
+                        inserted_count = int(parts[2])
 
             print(f"[DB] Batch upserted {inserted_count}/{len(leads)} leads.")
     except Exception as e:

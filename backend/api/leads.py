@@ -2,9 +2,10 @@ from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
-import asyncpg
-import os
+import logging
 from .auth import get_db_pool, get_current_user, UserResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -96,9 +97,10 @@ async def get_leads(
             if search:
                 # Simple escape - just escape special chars for LIKE
                 escaped = search.replace("%", "\\%").replace("_", "\\_")
-                conditions.append(f"(username ILIKE ${param_idx} OR email ILIKE ${param_idx})")
+                conditions.append(f"(username ILIKE ${param_idx} OR email ILIKE ${param_idx + 1})")
                 params.append(f"%{escaped}%")
-                param_idx += 1
+                params.append(f"%{escaped}%")
+                param_idx += 2
 
             if min_followers is not None:
                 conditions.append(f"followers >= ${param_idx}")
@@ -160,10 +162,9 @@ async def get_leads(
             )
         except HTTPException:
             raise
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        except Exception:
+            logger.exception("Error fetching leads")
+            raise HTTPException(status_code=500, detail="Database error")
 
 
 @router.get("/{lead_id}", response_model=LeadResponse)
@@ -197,10 +198,9 @@ async def get_lead(
             )
         except HTTPException:
             raise
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        except Exception:
+            logger.exception("Error fetching lead")
+            raise HTTPException(status_code=500, detail="Database error")
 
 
 @router.post("/", response_model=LeadResponse, status_code=status.HTTP_201_CREATED)
@@ -236,10 +236,9 @@ async def create_lead(
             )
         except HTTPException:
             raise
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        except Exception:
+            logger.exception("Error creating lead")
+            raise HTTPException(status_code=500, detail="Database error")
 
 
 @router.patch("/{lead_id}", response_model=LeadResponse)

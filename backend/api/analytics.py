@@ -1,9 +1,7 @@
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timedelta
-import asyncpg
-import os
 from .auth import get_db_pool, get_current_user, UserResponse
 
 router = APIRouter()
@@ -61,42 +59,39 @@ async def get_analytics(
     """Get analytics dashboard data."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        now = datetime.utcnow()
+        from datetime import timezone
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         week_ago = now - timedelta(days=7)
 
-        # Dashboard summary
-        total_leads = await conn.fetchval(
-            "SELECT COUNT(*) FROM leads WHERE user_id = $1", current_user.id
-        )
-        new_leads_this_week = await conn.fetchval(
-            "SELECT COUNT(*) FROM leads WHERE user_id = $1 AND created_at >= $2",
+        # Dashboard summary - merged into 2 queries instead of 6
+        leads_row = await conn.fetchrow(
+            """SELECT
+                COUNT(*) AS total_leads,
+                COUNT(*) FILTER (WHERE created_at >= $2) AS new_leads_this_week
+            FROM leads WHERE user_id = $1""",
             current_user.id, week_ago
         )
         total_products = await conn.fetchval(
             "SELECT COUNT(*) FROM products WHERE user_id = $1", current_user.id
         )
 
-        # Task counts
-        active_tasks = await conn.fetchval(
-            "SELECT COUNT(*) FROM tasks WHERE user_id = $1 AND status IN ('pending', 'running')",
-            current_user.id
-        )
-        completed_tasks = await conn.fetchval(
-            "SELECT COUNT(*) FROM tasks WHERE user_id = $1 AND status = 'completed'",
-            current_user.id
-        )
-        failed_tasks = await conn.fetchval(
-            "SELECT COUNT(*) FROM tasks WHERE user_id = $1 AND status = 'failed'",
+        # Task counts - single query with CASE expressions
+        tasks_row = await conn.fetchrow(
+            """SELECT
+                COUNT(*) FILTER (WHERE status IN ('pending', 'running')) AS active_tasks,
+                COUNT(*) FILTER (WHERE status = 'completed') AS completed_tasks,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed_tasks
+            FROM tasks WHERE user_id = $1""",
             current_user.id
         )
 
         dashboard = DashboardSummary(
-            total_leads=total_leads or 0,
-            new_leads_this_week=new_leads_this_week or 0,
+            total_leads=leads_row['total_leads'] or 0,
+            new_leads_this_week=leads_row['new_leads_this_week'] or 0,
             total_products=total_products or 0,
-            active_tasks=active_tasks or 0,
-            completed_tasks=completed_tasks or 0,
-            failed_tasks=failed_tasks or 0
+            active_tasks=tasks_row['active_tasks'] or 0,
+            completed_tasks=tasks_row['completed_tasks'] or 0,
+            failed_tasks=tasks_row['failed_tasks'] or 0
         )
 
         # Task status breakdown

@@ -15,7 +15,6 @@ Monitoring and Metrics Module
 """
 
 import time
-import os
 from typing import Dict, Optional
 from functools import wraps
 from datetime import datetime
@@ -122,7 +121,7 @@ def track_task(agent_name: str, task_type: str):
             try:
                 result = await func(*args, **kwargs)
                 return result
-            except Exception as e:
+            except Exception:
                 status = "error"
                 raise
             finally:
@@ -146,7 +145,7 @@ def track_scrape(platform: str):
             try:
                 result = await func(*args, **kwargs)
                 return result
-            except Exception as e:
+            except Exception:
                 status = "error"
                 raise
             finally:
@@ -209,6 +208,8 @@ class MetricsCollector:
 
     def get_content_type(self) -> str:
         """获取 Prometheus 内容类型"""
+        if not PROMETHEUS_AVAILABLE:
+            return "text/plain"
         return CONTENT_TYPE_LATEST
 
     def get_stats(self) -> Dict:
