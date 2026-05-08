@@ -585,6 +585,100 @@ body::after {
   box-shadow: 0 4px 20px rgba(236, 72, 153, 0.15);
 }
 
+/* Markdown rendered content styles */
+.chat-text h1, .chat-text h2, .chat-text h3,
+.ai-output-markdown h1, .ai-output-markdown h2, .ai-output-markdown h3 {
+  margin: 0.6em 0 0.3em;
+  font-weight: 700;
+  color: #fff;
+}
+.chat-text h1, .ai-output-markdown h1 { font-size: 1.15em; }
+.chat-text h2, .ai-output-markdown h2 { font-size: 1.05em; }
+.chat-text h3, .ai-output-markdown h3 { font-size: 0.95em; }
+
+.chat-text p, .ai-output-markdown p {
+  margin: 0.35em 0;
+}
+
+.chat-text ul, .chat-text ol,
+.ai-output-markdown ul, .ai-output-markdown ol {
+  margin: 0.35em 0;
+  padding-left: 1.5em;
+}
+
+.chat-text li, .ai-output-markdown li {
+  margin: 0.15em 0;
+}
+
+.chat-text code, .ai-output-markdown code {
+  background: rgba(255,255,255,0.08);
+  padding: 0.15em 0.4em;
+  border-radius: 0.25rem;
+  font-size: 0.88em;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+}
+
+.chat-text pre, .ai-output-markdown pre {
+  background: rgba(0,0,0,0.35);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 0.4rem;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+
+.chat-text pre code, .ai-output-markdown pre code {
+  background: none;
+  padding: 0;
+}
+
+.chat-text blockquote, .ai-output-markdown blockquote {
+  border-left: 3px solid rgba(99, 102, 241, 0.5);
+  padding-left: 0.75rem;
+  margin: 0.4em 0;
+  color: #9ca3af;
+}
+
+.chat-text strong, .ai-output-markdown strong {
+  font-weight: 700;
+  color: #fff;
+}
+
+.chat-text em, .ai-output-markdown em {
+  font-style: italic;
+  color: #c4b5fd;
+}
+
+.chat-text table, .ai-output-markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.85em;
+  width: 100%;
+}
+
+.chat-text th, .chat-text td,
+.ai-output-markdown th, .ai-output-markdown td {
+  border: 1px solid rgba(255,255,255,0.1);
+  padding: 0.35em 0.6em;
+  text-align: left;
+}
+
+.chat-text th, .ai-output-markdown th {
+  background: rgba(255,255,255,0.05);
+  font-weight: 600;
+}
+
+.chat-text hr, .ai-output-markdown hr {
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  margin: 0.6em 0;
+}
+
+.chat-text a, .ai-output-markdown a {
+  color: #818cf8;
+  text-decoration: underline;
+}
+
 .chat-input-area {
   padding: 1.5rem 2rem;
   border-top: 1px solid rgba(255,255,255,0.08);

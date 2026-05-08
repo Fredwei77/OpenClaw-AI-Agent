@@ -15,15 +15,15 @@ router = APIRouter()
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
-    import secrets
     import warnings
+    import hashlib
     warnings.warn(
-        "JWT_SECRET_KEY not set! Using a random key for development only. "
+        "JWT_SECRET_KEY not set! Using a deterministic dev key. "
         "Set JWT_SECRET_KEY in environment for production.",
         UserWarning
     )
-    # Generate a random key for development (sessions will be invalid after restart)
-    SECRET_KEY = secrets.token_urlsafe(32)
+    # Deterministic dev key — survives restarts so tokens stay valid
+    SECRET_KEY = hashlib.sha256(b"openclaw-dev-key-stable").hexdigest()
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -38,6 +38,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 class UserCreate(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6)
+    name: Optional[str] = None  # optional display name (currently unused, accepted for frontend compat)
     role: Literal["user", "moderator"] = "user"
 
 

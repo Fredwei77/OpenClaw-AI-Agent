@@ -36,6 +36,7 @@ def _get_llm_client() -> AsyncOpenAI:
 
 class ChatRequest(BaseModel):
     prompt: str
+    language: str = "en"
 
 
 class ScrapeRequest(BaseModel):
@@ -65,6 +66,12 @@ class TaskStatusRequest(BaseModel):
     task_id: int
 
 
+class MarketingPipelineRequest(BaseModel):
+    leads: list
+    product_context: str = ""
+    language: str = "en"
+
+
 # ========================
 # LLM Test Endpoint
 # ========================
@@ -82,10 +89,18 @@ async def test_llm(request: ChatRequest):
     try:
         client = _get_llm_client()
 
+        lang = request.language if request.language in ("zh", "en") else "en"
+        system_prompt = (
+            "You are a helpful assistant for cross-border e-commerce. "
+            "Always respond in the same language as the user's message. "
+            "Use clean plain text or markdown formatting. "
+            "Do NOT translate the user's input into another language."
+        )
+
         response = await client.chat.completions.create(
             model="meta-llama/llama-3-8b-instruct",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant for cross-border e-commerce."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request.prompt}
             ],
             extra_headers={
@@ -407,6 +422,12 @@ async def _scrape_twitter(page, keyword: str) -> list:
 
     # 等待页面加载
     await asyncio.sleep(3)
+
+    # 检测登录墙
+    current_url = page.url
+    if "login" in current_url or "i/flow/login" in current_url:
+        print("[API] Twitter: login wall detected — search requires authentication")
+        return []
 
     # 向下滚动几次加载更多真实用户
     for _ in range(3):
@@ -734,29 +755,72 @@ async def _scrape_shopify(page, keyword: str, store_domain: str = None) -> list:
     return leads
 
 
-async def _scrape_google(page, keyword: str) -> list:
+async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
     """Scrape Google search results for websites/companies matching keyword"""
     import urllib.parse
+    from urllib.parse import urlparse
     leads = []
 
     # Google search URL
     encoded_keyword = urllib.parse.quote(keyword)
-    url = f"https://www.google.com/search?q={encoded_keyword}+company&num=20"
+    url = f"https://www.google.com/search?q={encoded_keyword}+{urllib.parse.quote(suffix)}&num=20" if suffix else f"https://www.google.com/search?q={encoded_keyword}&num=20"
 
     print(f"[API] Google: navigating to {url}")
     try:
         response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         print(f"[API] Google: response status = {response.status}, url = {page.url}")
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
 
-        # Check for robots check
-        if "sorry" in page.url.lower() or "search1972" in page.url:
-            print("[API] Google: blocked by robots check")
+        # Handle consent/cookie page (common in EU)
+        try:
+            consent_btn = await page.query_selector('button:has-text("Accept all"), button:has-text("Reject all"), button:has-text("I agree")')
+            if consent_btn:
+                await consent_btn.click()
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        # Check for robots/CAPTCHA check
+        current_url = page.url.lower()
+        page_text = (await page.content()).lower()
+        if "sorry" in current_url or "search1972" in current_url or "captcha" in page_text or "unusual traffic" in page_text:
+            print("[API] Google: blocked by CAPTCHA/robots check")
             return []
 
-        # Extract search results
-        results = await page.query_selector_all('.g')
+        # Extract search results — try multiple selectors
+        results = []
+        for selector in ['div.g', 'div[data-sokoban-container]', 'div.tF2Cxc', '.MjjYud']:
+            results = await page.query_selector_all(selector)
+            if results:
+                print(f"[API] Google: found {len(results)} results with selector '{selector}'")
+                break
+
+        if not results:
+            # Fallback: get all h3 elements (each is a search result title)
+            h3s = await page.query_selector_all('h3')
+            print(f"[API] Google: fallback found {len(h3s)} h3 elements")
+            for h3 in h3s[:15]:
+                try:
+                    title = await h3.text_content()
+                    # Walk up to find the parent <a> tag
+                    link_el = await h3.evaluate_handle('el => el.closest("a")')
+                    if link_el:
+                        href = await link_el.get_attribute('href')
+                        if title and href and href.startswith('http'):
+                            domain = urlparse(href).netloc
+                            leads.append({
+                                "platform": "google",
+                                "username": title.strip(),
+                                "profile_url": href,
+                                "email": None,
+                                "followers": 0,
+                                "tags": [keyword, domain]
+                            })
+                except Exception:
+                    continue
+            print(f"[API] Google: extracted {len(leads)} results via h3 fallback")
+            return leads
 
         for result in results[:15]:
             try:
@@ -767,8 +831,6 @@ async def _scrape_google(page, keyword: str) -> list:
                 href = await link_el.get_attribute('href') if link_el else ""
 
                 if title and href and href.startswith('http'):
-                    # Extract domain from URL
-                    from urllib.parse import urlparse
                     domain = urlparse(href).netloc
 
                     leads.append({
@@ -777,7 +839,7 @@ async def _scrape_google(page, keyword: str) -> list:
                         "profile_url": href,
                         "email": None,
                         "followers": 0,
-                        "tags": [keyword, "company", domain]
+                        "tags": [keyword, domain]
                     })
             except Exception:
                 continue
@@ -786,6 +848,73 @@ async def _scrape_google(page, keyword: str) -> list:
 
     except Exception as e:
         print(f"[API] Google: error: {e}")
+
+    return leads
+
+
+async def _scrape_duckduckgo(page, keyword: str) -> list:
+    """Scrape DuckDuckGo search results — more headless-friendly than Google"""
+    import urllib.parse
+    from urllib.parse import urlparse
+    leads = []
+
+    encoded_keyword = urllib.parse.quote(keyword)
+    url = f"https://html.duckduckgo.com/html/?q={encoded_keyword}"
+
+    print(f"[API] DuckDuckGo: navigating to {url}")
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        print(f"[API] DuckDuckGo: response status = {response.status}, url = {page.url}")
+
+        await asyncio.sleep(2)
+
+        # DuckDuckGo HTML version has simple structure
+        results = await page.query_selector_all('.result')
+        if not results:
+            results = await page.query_selector_all('.web-result')
+        if not results:
+            # Fallback: try result links directly
+            results = await page.query_selector_all('.result__a')
+
+        print(f"[API] DuckDuckGo: found {len(results)} result elements")
+
+        for result in results[:15]:
+            try:
+                # Try to get title and link
+                link_el = await result.query_selector('a.result__a, a.result__url, a')
+                if not link_el:
+                    continue
+
+                title = await link_el.text_content()
+                href = await link_el.get_attribute('href')
+
+                if not href:
+                    continue
+
+                # DuckDuckGo sometimes uses redirect URLs
+                if '/l/?uddg=' in href:
+                    import re
+                    match = re.search(r'uddg=([^&]+)', href)
+                    if match:
+                        href = urllib.parse.unquote(match.group(1))
+
+                if title and href and href.startswith('http'):
+                    domain = urlparse(href).netloc
+                    leads.append({
+                        "platform": "duckduckgo",
+                        "username": title.strip(),
+                        "profile_url": href,
+                        "email": None,
+                        "followers": 0,
+                        "tags": [keyword, domain]
+                    })
+            except Exception:
+                continue
+
+        print(f"[API] DuckDuckGo: extracted {len(leads)} results")
+
+    except Exception as e:
+        print(f"[API] DuckDuckGo: error: {e}")
 
     return leads
 
@@ -899,6 +1028,8 @@ async def test_scraper(request: ScrapeRequest):
 
             leads = []
             platform = request.platform.lower()
+            scrape_source = platform
+            print(f"[API] Starting scrape: platform={platform}, keyword={request.keyword}")
 
             # 根据平台选择爬取函数
             if platform in ["twitter", "x"]:
@@ -917,9 +1048,22 @@ async def test_scraper(request: ScrapeRequest):
                 leads = await _scrape_tiktok(page, request.keyword)
             elif platform == "facebook":
                 leads = await _scrape_facebook(page, request.keyword)
+            elif platform == "duckduckgo":
+                leads = await _scrape_duckduckgo(page, request.keyword)
             else:
                 # 未知平台，返回 mock
                 pass
+
+            # 平台直连爬取失败时，回退到 DuckDuckGo 搜索（无需登录，不封 headless）
+            if not leads and platform not in ["google", "directory", "duckduckgo"]:
+                print(f"[API] {platform} returned 0 leads, falling back to DuckDuckGo search")
+                scrape_source = f"{platform}+ddg"
+                leads = await _scrape_duckduckgo(page, f"{request.keyword} {platform}")
+                # DuckDuckGo 也失败则尝试 Google
+                if not leads:
+                    print("[API] DuckDuckGo returned 0 leads, trying Google search")
+                    scrape_source = f"{platform}+google"
+                    leads = await _scrape_google(page, f"{request.keyword} {platform}", suffix="")
 
             await page.close()
 
@@ -941,6 +1085,7 @@ async def test_scraper(request: ScrapeRequest):
             return {
                 "status": "success",
                 "leads_found": len(leads),
+                "source": scrape_source,
                 "context_id": context_id,
                 "instance_id": instance.instance_id,
                 "data": leads
@@ -1186,3 +1331,343 @@ async def harness_status(current_user=Depends(get_current_user)):
         "chrome_debug_port": chrome_running,
         "ws_debug_url": get_ws_debug_url() if chrome_running else None,
     }
+
+
+# ========================
+# Marketing Pipeline (Research + Chat Agents)
+# ========================
+
+import json
+import re as _re
+
+_pipeline_semaphore = asyncio.Semaphore(3)
+
+RESEARCH_SYSTEM_PROMPT = """You are a B2B lead research analyst for cross-border e-commerce. Analyze the given lead profile and return a JSON object with these fields:
+- "industry": the lead's likely business type or industry (1-5 words, in English)
+- "interests": array of 2-4 potential business interests or needs (in English)
+- "best_channel": either "email" or "social_dm" based on which outreach method would be most effective
+- "talking_points": array of 2-3 personalized conversation starters based on their profile (in English)
+- "quality_score": integer 0-100 estimating lead quality (consider followers, profile completeness, relevance)
+- "tier": "A" if quality_score >= 75, "B" if >= 50, "C" otherwise
+
+IMPORTANT: All text values in the JSON must be written in English. Do not use Chinese or any other language.
+Respond with ONLY valid JSON, no markdown, no explanation."""
+
+CHAT_SYSTEM_PROMPT = """You are a B2B marketing copywriter for cross-border e-commerce. Given a lead's research profile, generate personalized outreach messages for 3 channels. Return a JSON object with a "messages" array containing exactly 3 objects, each with:
+- "channel": "email", "linkedin_dm", or "twitter_dm"
+- "subject": email subject line (empty string for non-email channels)
+- "body": the message body (twitter_dm must be under 280 characters)
+- "cta": call to action text
+
+Guidelines:
+- Reference specific details from the lead's profile and interests
+- Match the tone to the platform (professional for email/LinkedIn, casual for Twitter)
+- For tier A leads, be more detailed and personalized
+- For tier C leads, keep it brief and value-focused
+- Include a clear call-to-action in each message
+- IMPORTANT: All text (subject, body, cta) must be written in English unless explicitly told otherwise
+
+Respond with ONLY valid JSON, no markdown."""
+
+
+def _strip_json_fences(text: str) -> str:
+    """Strip markdown code fences from LLM response."""
+    text = text.strip()
+    text = _re.sub(r'^```(?:json)?\s*', '', text)
+    text = _re.sub(r'\s*```$', '', text)
+    return text.strip()
+
+
+def _lead_fallback_research(lead: dict) -> dict:
+    """Fallback research when LLM fails."""
+    followers = lead.get("followers", 0)
+    score = min(50, max(10, followers // 200))
+    tier = "A" if score >= 75 else ("B" if score >= 50 else "C")
+    return {
+        "industry": lead.get("tags", ["Unknown"])[0] if lead.get("tags") else "Unknown",
+        "interests": lead.get("tags", [])[:3] or ["general business"],
+        "best_channel": "email" if lead.get("email") else "social_dm",
+        "talking_points": [f"Active on {lead.get('platform', 'social media')}", "Potential collaboration opportunity"],
+        "quality_score": score,
+        "tier": tier
+    }
+
+
+async def _research_lead(client, lead: dict, product_context: str, language: str) -> dict:
+    """Research Agent: analyze a single lead via LLM."""
+    async with _pipeline_semaphore:
+        try:
+            user_prompt = f"""Lead profile:
+- Platform: {lead.get('platform', 'unknown')}
+- Username: {lead.get('username', 'unknown')}
+- Profile URL: {lead.get('profile_url', 'none')}
+- Email: {lead.get('email') or 'none'}
+- Followers: {lead.get('followers', 0)}
+- Tags: {lead.get('tags', [])}"""
+
+            if product_context:
+                user_prompt += f"\n\nProduct context: {product_context}"
+            if language == "zh":
+                user_prompt += "\n\n请用中文回复所有字段。"
+            else:
+                user_prompt += "\n\nIMPORTANT: Write ALL fields (industry, interests, talking_points) in English only."
+
+            response = await client.chat.completions.create(
+                model="meta-llama/llama-3-8b-instruct",
+                messages=[
+                    {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                max_tokens=500
+            )
+            raw = response.choices[0].message.content
+            result = json.loads(_strip_json_fences(raw))
+            # Ensure required fields
+            for key in ["industry", "interests", "best_channel", "talking_points", "quality_score", "tier"]:
+                if key not in result:
+                    result[key] = _lead_fallback_research(lead)[key]
+            return result
+        except Exception as e:
+            print(f"[ResearchAgent] Failed for {lead.get('username')}: {e}")
+            return _lead_fallback_research(lead)
+
+
+async def _generate_messages(client, lead: dict, research: dict, product_context: str, language: str) -> list:
+    """Chat Agent: generate personalized outreach messages."""
+    async with _pipeline_semaphore:
+        try:
+            user_prompt = f"""Lead research:
+- Username: {lead.get('username', 'unknown')}
+- Platform: {lead.get('platform', 'unknown')}
+- Industry: {research.get('industry', 'Unknown')}
+- Interests: {research.get('interests', [])}
+- Best channel: {research.get('best_channel', 'email')}
+- Talking points: {research.get('talking_points', [])}
+- Quality tier: {research.get('tier', 'C')}
+- Followers: {lead.get('followers', 0)}
+- Email: {lead.get('email') or 'none'}"""
+
+            if product_context:
+                user_prompt += f"\n\nProduct context: {product_context}"
+            if language == "zh":
+                user_prompt += "\n\n请用中文撰写所有消息（subject、body、cta）。"
+            else:
+                user_prompt += "\n\nIMPORTANT: Write ALL messages (subject, body, cta) in English only. Do not use Chinese."
+
+            response = await client.chat.completions.create(
+                model="meta-llama/llama-3-8b-instruct",
+                messages=[
+                    {"role": "system", "content": CHAT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt}
+                ],
+                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                max_tokens=1500
+            )
+            raw = response.choices[0].message.content
+            result = json.loads(_strip_json_fences(raw))
+            messages = result.get("messages", [])
+            # Validate twitter_dm length
+            for msg in messages:
+                if msg.get("channel") == "twitter_dm" and len(msg.get("body", "")) > 280:
+                    msg["body"] = msg["body"][:277] + "..."
+            return messages if messages else _fallback_messages(lead, research, language)
+        except Exception as e:
+            print(f"[ChatAgent] Failed for {lead.get('username')}: {e}")
+            return _fallback_messages(lead, research, language)
+
+
+def _fallback_messages(lead: dict, research: dict, language: str) -> list:
+    """Fallback messages when LLM fails."""
+    username = lead.get("username", "")
+    industry = research.get("industry", "your industry")
+    tier = research.get("tier", "C")
+
+    if language == "zh":
+        return [
+            {"channel": "email", "subject": f"关于{industry}的合作机会", "body": f"您好 {username}，我们注意到您在{industry}领域的活跃表现，希望能探讨合作机会。", "cta": "预约15分钟通话"},
+            {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}，看了您的资料很感兴趣，方便聊聊合作吗？", "cta": ""},
+            {"channel": "twitter_dm", "subject": "", "body": f"Hi {username}! 对您的业务很感兴趣，期待交流 🤝", "cta": ""}
+        ]
+    else:
+        return [
+            {"channel": "email", "subject": f"Collaboration opportunity in {industry}", "body": f"Hi {username},\n\nWe noticed your active presence in {industry} and would love to explore a potential collaboration.", "cta": "Book a 15-min call"},
+            {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}, I came across your profile and found your work in {industry} impressive. Would you be open to a quick chat?", "cta": ""},
+            {"channel": "twitter_dm", "subject": "", "body": f"Hey {username}! Love what you're doing in {industry}. Let's connect! 🤝", "cta": ""}
+        ]
+
+
+@router.post("/marketing-pipeline")
+async def marketing_pipeline(
+    request: MarketingPipelineRequest,
+    current_user=Depends(get_current_user)
+):
+    """
+    Full marketing pipeline: Research Agent + Chat Agent.
+    Analyzes each lead and generates personalized multi-channel messages.
+    """
+    try:
+        client = _get_llm_client()
+    except RuntimeError:
+        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
+
+    leads = request.leads[:20]  # Cap at 20 leads
+    if not leads:
+        return {"status": "error", "message": "No leads provided"}
+
+    product_context = request.product_context
+    language = request.language
+    user_id = current_user.id
+
+    # Stage 1: Research Agent — analyze all leads concurrently
+    research_tasks = [_research_lead(client, lead, product_context, language) for lead in leads]
+    research_results = await asyncio.gather(*research_tasks)
+
+    # Stage 2: Chat Agent — generate messages for each lead
+    message_tasks = [
+        _generate_messages(client, leads[i], research_results[i], product_context, language)
+        for i in range(len(leads))
+    ]
+    all_messages = await asyncio.gather(*message_tasks)
+
+    # Stage 3: Save to database and build response
+    tier_distribution = {"A": 0, "B": 0, "C": 0}
+    results = []
+    db_messages = []
+
+    for i, lead in enumerate(leads):
+        research = research_results[i]
+        messages = all_messages[i]
+
+        tier_distribution[research.get("tier", "C")] += 1
+
+        # Save research to leads table
+        lead_id = lead.get("id")
+        if lead_id:
+            from db import save_lead_research, save_marketing_messages
+            await save_lead_research(lead_id, research, research.get("quality_score", 0))
+
+        # Prepare messages for DB
+        for msg in messages:
+            db_messages.append({
+                "lead_id": lead_id,
+                "user_id": user_id,
+                "channel": msg.get("channel", ""),
+                "subject": msg.get("subject", ""),
+                "body": msg.get("body", ""),
+                "cta": msg.get("cta", ""),
+                "sequence_step": 1,
+                "status": "draft"
+            })
+
+        results.append({
+            "lead": {
+                "id": lead_id,
+                "username": lead.get("username", ""),
+                "platform": lead.get("platform", ""),
+                "profile_url": lead.get("profile_url", ""),
+                "followers": lead.get("followers", 0)
+            },
+            "research": research,
+            "messages": messages
+        })
+
+    # Batch save messages
+    if db_messages:
+        from db import save_marketing_messages
+        await save_marketing_messages(db_messages)
+
+    return {
+        "status": "success",
+        "summary": {
+            "total_leads": len(leads),
+            "researched": len(research_results),
+            "messages_generated": sum(len(m) for m in all_messages),
+            "tier_distribution": tier_distribution
+        },
+        "results": results
+    }
+
+
+# ─── Skill Execution ──────────────────────────────────────────────
+
+class SkillExecuteRequest(BaseModel):
+    skill_id: str
+    input_text: str = ""
+    language: str = "en"
+
+
+_SKILL_PROMPTS = {
+    "s1": {
+        "system": "You are a professional multilingual translator. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Translate the following text into English, Chinese, Spanish, French, and German.\n\nText:\n{input}\n\nReturn JSON:\n{{\"translations\": [{{\"lang\": \"en\", \"text\": \"...\"}}, {{\"lang\": \"zh\", \"text\": \"...\"}}, {{\"lang\": \"es\", \"text\": \"...\"}}, {{\"lang\": \"fr\", \"text\": \"...\"}}, {{\"lang\": \"de\", \"text\": \"...\"}}]}}"
+    },
+    "s2": {
+        "system": "You are a market research analyst. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Analyze the top competitors for the following product/niche/leads data. Identify strengths, weaknesses, and market opportunities.\n\nContext:\n{input}\n\nReturn JSON:\n{{\"competitors\": [{{\"name\": \"...\", \"strengths\": [\"...\"], \"weaknesses\": [\"...\"], \"opportunities\": [\"...\"]}}], \"market_trends\": [\"...\"], \"recommendation\": \"...\"}}"
+    },
+    "s3": {
+        "system": "You are an email marketing expert specializing in high-open-rate subject lines. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Generate 10 high-open-rate email subject lines for the following product/niche/campaign.\n\nContext:\n{input}\n\nReturn JSON:\n{{\"subjects\": [{{\"text\": \"...\", \"predicted_open_rate\": \"35%\", \"rationale\": \"...\"}}]}}"
+    },
+    "s4": {
+        "system": "You are a LinkedIn outreach specialist. Write professional, personalized DMs. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Generate 3 LinkedIn outreach DM variants for the following lead/context. Each variant should have a different tone (professional, friendly, bold).\n\nContext:\n{input}\n\nReturn JSON:\n{{\"scripts\": [{{\"variant\": \"Professional\", \"opener\": \"...\", \"body\": \"...\", \"cta\": \"...\", \"tone\": \"professional\"}}, {{\"variant\": \"Friendly\", \"opener\": \"...\", \"body\": \"...\", \"cta\": \"...\", \"tone\": \"friendly\"}}, {{\"variant\": \"Bold\", \"opener\": \"...\", \"body\": \"...\", \"cta\": \"...\", \"tone\": \"bold\"}}]}}"
+    },
+    "s5": {
+        "system": "You are a conversion rate optimization expert. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Given the following marketing copy, generate 3 A/B test variants. Each variant should change a different element (headline, CTA, tone).\n\nOriginal copy:\n{input}\n\nReturn JSON:\n{{\"variants\": [{{\"variant_id\": \"A\", \"text\": \"...\", \"change_description\": \"...\", \"hypothesis\": \"...\"}}, {{\"variant_id\": \"B\", \"text\": \"...\", \"change_description\": \"...\", \"hypothesis\": \"...\"}}, {{\"variant_id\": \"C\", \"text\": \"...\", \"change_description\": \"...\", \"hypothesis\": \"...\"}}]}}"
+    },
+    "s6": {
+        "system": "You are a data quality analyst. Return valid JSON only, no markdown fences. Write ALL text content in {lang_name}.",
+        "user_tpl": "Analyze the following leads data for quality issues. Flag duplicates, missing fields, invalid emails, suspicious entries, and low-quality records.\n\nLeads data:\n{input}\n\nReturn JSON:\n{{\"total\": 10, \"valid\": 8, \"issues_found\": 2, \"cleaned_leads\": [...], \"removed\": [...], \"issues\": [{{\"lead\": \"...\", \"reason\": \"...\"}}], \"summary\": \"...\"}}"
+    },
+}
+
+
+@router.post("/execute-skill")
+async def execute_skill(request: SkillExecuteRequest, current_user=Depends(get_current_user)):
+    """Execute a skill module via LLM."""
+    skill_id = request.skill_id
+    if skill_id not in _SKILL_PROMPTS:
+        raise HTTPException(status_code=400, detail=f"Unknown skill_id: {skill_id}")
+
+    prompt_cfg = _SKILL_PROMPTS[skill_id]
+    is_zh = request.language == "zh"
+    lang_name = "Chinese" if is_zh else "English"
+    system_prompt = prompt_cfg["system"].replace("{lang_name}", lang_name)
+    user_content = prompt_cfg["user_tpl"].replace("{input}", request.input_text or ("(未提供输入)" if is_zh else "(no input provided)"))
+    user_content += "\n\n" + ("请用中文回复所有文本内容。只返回纯JSON，不要用markdown代码块包裹。" if is_zh else "Write ALL text content in English. Return raw JSON only, do not wrap in markdown code blocks.")
+
+    try:
+        client = _get_llm_client()
+        async with _pipeline_semaphore:
+            response = await client.chat.completions.create(
+                model="meta-llama/llama-3-8b-instruct",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content}
+                ],
+                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                max_tokens=2000
+            )
+            raw = response.choices[0].message.content
+            result = json.loads(_strip_json_fences(raw))
+            return {"status": "success", "skill_id": skill_id, "result": result}
+    except json.JSONDecodeError:
+        # Try to fix common JSON issues from LLM output
+        try:
+            fixed = raw.strip()
+            # Remove markdown code fences if present
+            if fixed.startswith("```"):
+                first_newline = fixed.index("\n")
+                fixed = fixed[first_newline + 1:]
+            if fixed.endswith("```"):
+                fixed = fixed[:-3].rstrip()
+            result = json.loads(fixed)
+            return {"status": "success", "skill_id": skill_id, "result": result}
+        except Exception:
+            return {"status": "success", "skill_id": skill_id, "result": {"raw_output": raw}}
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))

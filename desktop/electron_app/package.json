@@ -1,11 +1,12 @@
 {
   "name": "openclaw-ai-agent",
   "version": "1.0.0",
-  "description": "OpenClaw AI Cross-Border Agent",
+  "description": "OpenClaw AI - Cross-Border Ecommerce AI Agent",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis"
+    "dist": "electron-builder --win nsis",
+    "build": "npm run dist"
   },
   "author": "OpenClaw",
   "devDependencies": {
@@ -16,10 +17,18 @@
     "appId": "com.openclaw.agent",
     "productName": "OpenClaw AI",
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": null
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": null,
+      "uninstallerIcon": null
     },
     "files": [
       "main.js",
+      "preload.js",
       "package.json"
     ],
     "extraResources": [
@@ -38,6 +47,14 @@
       {
         "from": "../../browser_cluster",
         "to": "browser_cluster"
+      },
+      {
+        "from": "../../database",
+        "to": "database"
+      },
+      {
+        "from": "../../plugins",
+        "to": "plugins"
       },
       {
         "from": "../../.env",

@@ -1,3 +1,0 @@
-﻿  鈥?electron-builder  version=25.1.8 os=10.0.26200
-  鈥?loaded configuration  file=package.json ("build" field)
-  猕?Package "electron" is only allowed in "devDependencies". Please remove it from the "dependencies" section in your package.json.

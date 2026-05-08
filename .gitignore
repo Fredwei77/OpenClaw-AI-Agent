@@ -65,3 +65,29 @@ test-results/
 playwright-report/
 blob-report/
 playwright/.cache/
+
+# ========================
+# 日志与临时文件
+# ========================
+*.log
+*.tmp
+
+# ========================
+# 二进制工具与大文件
+# ========================
+tools/
+*.exe
+*.zip
+*.mp4
+*.avi
+*.mov
+
+# ========================
+# Electron 构建产物
+# ========================
+desktop/electron_app/dist/
+desktop/electron_app/out/
+build_error*.txt
+out.txt
+out.utf8.txt
+python_path_debug.txt

@@ -1,28 +1,40 @@
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 import logging
 import time
 
 logger = logging.getLogger(__name__)
 
 
-class GlobalResponseMiddleware(BaseHTTPMiddleware):
-    """Middleware for unified response format and request logging."""
+class GlobalResponseMiddleware:
+    """ASGI middleware for request logging. Uses raw ASGI to avoid BaseHTTPMiddleware
+    compatibility issues with CORSMiddleware."""
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         start_time = time.time()
+        method = scope.get("method", "?")
+        path = scope.get("path", "?")
+        status_code = 0
 
-        response = await call_next(request)
+        async def send_wrapper(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message.get("status", 0)
+            await send(message)
 
-        # Log request details
+        await self.app(scope, receive, send_wrapper)
+
         duration = time.time() - start_time
-        logger.info(
-            f"{request.method} {request.url.path} - {response.status_code} - {duration:.3f}s"
-        )
-
-        return response
+        logger.info(f"{method} {path} - {status_code} - {duration:.3f}s")
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:

@@ -48,6 +48,14 @@ OpenClaw AI Agent/
 │   └── migrations/
 │       └── init.sql          # 数据库初始化
 │
+├── design_references/        # 设计系统参考库 (DESIGN.md)
+│   ├── INDEX.md              # 选用指南与快速对照
+│   ├── shopify.md            # 深色电商主题
+│   ├── stripe.md             # 白底金融/支付
+│   ├── linear.md             # 深色数据面板
+│   ├── vercel.md             # 极简开发者工具
+│   ├── notion.md             # 编辑器/内容平台
+│   └── supabase.md           # 深色开发者平台
 ├── desktop/                  # Electron 桌面应用
 ├── plugins/                  # 插件系统
 ├── scripts/                  # 自动化脚本
@@ -93,6 +101,21 @@ cd frontend && npm run dev            # 前端 http://localhost:5173
 # 或
 psql $DATABASE_URL -f database/migrations/init.sql
 ```
+
+## 设计系统参考
+
+`design_references/` 目录包含 6 套顶级品牌的设计规范 (DESIGN.md)，来源于 [VoltAgent/awesome-design-md](https://github.com/VoltAgent/awesome-design-md)。Agent 在生成前端 UI 时应参考对应的设计文件。
+
+| 场景 | 参考文件 | 原因 |
+|------|----------|------|
+| 后台 Dashboard | `linear.md` | 深色主题、数据密集布局 |
+| 电商产品页 | `shopify.md` | 电商基因、产品展示模式 |
+| 支付/金融 | `stripe.md` | 精密间距、表格数字 |
+| 定价/功能对比 | `notion.md` | 四档定价、彩色卡片 |
+| 极简首页 | `vercel.md` | 纯白画布、shadow-as-border |
+| 开发者/API | `supabase.md` | 深色原生、emerald 品牌色 |
+
+详见 `design_references/INDEX.md`。
 
 ## 技术栈
 

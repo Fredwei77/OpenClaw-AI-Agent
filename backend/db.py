@@ -1,4 +1,5 @@
 import os
+import json
 import asyncpg
 from typing import List, Dict, Optional
 from contextlib import asynccontextmanager
@@ -14,7 +15,9 @@ async def get_db_pool() -> asyncpg.Pool:
     """Get or create database connection pool."""
     global _db_pool
     if _db_pool is None:
-        database_url = os.getenv("DATABASE_URL", "postgresql://postgres:openclaw@localhost:5432/openclaw_db")
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError("DATABASE_URL environment variable is not set. Please configure it in .env")
         _db_pool = await asyncpg.create_pool(
             database_url,
             min_size=5,
@@ -189,3 +192,43 @@ async def get_task(task_id: int) -> Optional[Dict]:
     except Exception as e:
         print(f"[DB Error] Failed to get task {task_id}: {e}")
         return None
+
+
+async def save_lead_research(lead_id: int, metadata: dict, quality_score: int) -> bool:
+    """Save research metadata and quality score to a lead."""
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """UPDATE leads
+                   SET metadata = $2, quality_score = $3
+                   WHERE id = $1""",
+                lead_id, json.dumps(metadata), quality_score
+            )
+            return True
+    except Exception as e:
+        print(f"[DB Error] Failed to save lead research for {lead_id}: {e}")
+        return False
+
+
+async def save_marketing_messages(messages: list) -> int:
+    """Batch insert generated marketing messages."""
+    if not messages:
+        return 0
+    pool = await get_db_pool()
+    try:
+        async with pool.acquire() as conn:
+            count = 0
+            for msg in messages:
+                await conn.execute(
+                    """INSERT INTO marketing_messages (lead_id, user_id, channel, subject, body, cta, sequence_step, status)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                    msg.get('lead_id'), msg.get('user_id'), msg.get('channel'),
+                    msg.get('subject', ''), msg.get('body', ''), msg.get('cta', ''),
+                    msg.get('sequence_step', 1), msg.get('status', 'draft')
+                )
+                count += 1
+            return count
+    except Exception as e:
+        print(f"[DB Error] Failed to save marketing messages: {e}")
+        return 0

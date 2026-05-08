@@ -1,9 +1,39 @@
 import { useState, useRef, useEffect } from 'react';
 import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import ReactMarkdown from 'react-markdown';
 
 // Use environment variable for backend URL if available, default to localhost:8000
 const API_BASE_URL = import.meta.env?.VITE_API_URL || 'http://127.0.0.1:8000';
+
+// Decode JWT payload without verifying signature (client-side only)
+function parseJwt(token) {
+  try {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(atob(base64).split('').map(c =>
+      '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2)
+    ).join(''));
+    return JSON.parse(jsonPayload);
+  } catch {
+    return null;
+  }
+}
+
+// Safely coerce a value to an array (handles string, null, undefined)
+function toArray(val) {
+  if (Array.isArray(val)) return val;
+  if (typeof val === 'string' && val.trim()) return [val];
+  return [];
+}
+
+function isTokenValid(token) {
+  if (!token) return false;
+  const payload = parseJwt(token);
+  if (!payload || !payload.exp) return false;
+  // Check if token expires within the next 60 seconds
+  return payload.exp > (Date.now() / 1000) + 60;
+}
 
 const i18n = {
   en: {
@@ -67,7 +97,33 @@ const i18n = {
     settingsSuccess: "Connected",
     marketTitle: "Plugin Marketplace",
     pluginInstall: "Install",
-    pluginInstalled: "Installed"
+    pluginInstalled: "Installed",
+    pipelineTitle: "Full Marketing Pipeline",
+    pipelineDesc: "Research Agent + Chat Agent: analyze leads, generate multi-channel messages",
+    pipelineTag: "Pipeline",
+    pipelineRunning: "Pipeline processing...",
+    pipelineResearch: "Research Agent analyzing leads...",
+    pipelineChat: "Chat Agent generating messages...",
+    pipelineDone: "Pipeline complete",
+    pipelineCopyAll: "Copy All",
+    pipelineTier: "Tier",
+    pipelineScore: "Score",
+    pipelineMessages: "Messages",
+    pipelineSummary: "Pipeline Summary",
+    pipelineHighTier: "High",
+    pipelineMidTier: "Medium",
+    pipelineLowTier: "Low",
+    pipelineEmail: "Email",
+    pipelineLinkedIn: "LinkedIn DM",
+    pipelineTwitter: "Twitter DM",
+    skillRun: "Run Skill",
+    skillRunning: "Executing...",
+    skillInputPlaceholder: "Enter text, keywords, or paste data for the skill to process...",
+    skillResult: "Result",
+    skillCopy: "Copy",
+    skillCopied: "Copied",
+    skillInputRequired: "Please enter some input text for the skill",
+    skillLoginRequired: "Please log in first"
   },
   zh: {
     brand: "OpenClaw 智爪",
@@ -130,7 +186,33 @@ const i18n = {
     settingsSuccess: "连接成功",
     marketTitle: "插件发现市场",
     pluginInstall: "安装",
-    pluginInstalled: "已安装"
+    pluginInstalled: "已安装",
+    pipelineTitle: "全自动营销管道",
+    pipelineDesc: "Research Agent + Chat Agent：深度分析线索，自动生成多渠道营销消息",
+    pipelineTag: "全自动化",
+    pipelineRunning: "管道处理中...",
+    pipelineResearch: "Research Agent 正在分析线索...",
+    pipelineChat: "Chat Agent 正在生成消息...",
+    pipelineDone: "管道执行完成",
+    pipelineCopyAll: "全部复制",
+    pipelineTier: "层级",
+    pipelineScore: "评分",
+    pipelineMessages: "消息",
+    pipelineSummary: "管道摘要",
+    pipelineHighTier: "高意向",
+    pipelineMidTier: "中意向",
+    pipelineLowTier: "低意向",
+    pipelineEmail: "邮件",
+    pipelineLinkedIn: "领英私信",
+    pipelineTwitter: "推特私信",
+    skillRun: "执行技能",
+    skillRunning: "执行中...",
+    skillInputPlaceholder: "输入文本、关键词或粘贴数据，供技能处理...",
+    skillResult: "执行结果",
+    skillCopy: "复制",
+    skillCopied: "已复制",
+    skillInputRequired: "请输入技能所需的文本内容",
+    skillLoginRequired: "请先登录"
   }
 };
 
@@ -157,6 +239,12 @@ function App() {
   const [marketingResult, setMarketingResult] = useState('');
   const [marketingActionTitle, setMarketingActionTitle] = useState('');
 
+  // Marketing Pipeline State
+  const [pipelineLoading, setPipelineLoading] = useState(false);
+  const [pipelineResult, setPipelineResult] = useState(null);
+  const [pipelineStep, setPipelineStep] = useState('');
+  const [expandedLead, setExpandedLead] = useState(null);
+
   // i18n Language State
   const [lang, setLang] = useState('zh');
   const t = i18n[lang];
@@ -172,6 +260,10 @@ function App() {
   // Plugin State
   const [pluginSearchQuery, setPluginSearchQuery] = useState('');
   const [skillSearchQuery, setSkillSearchQuery] = useState('');
+  const [skillRunning, setSkillRunning] = useState(null);
+  const [skillResult, setSkillResult] = useState(null);
+  const [skillInput, setSkillInput] = useState('');
+  const [selectedSkill, setSelectedSkill] = useState(null);
   const [plugins, setPlugins] = useState([
     { id: 'plugin-1', name: 'Lead Scraper Core', version: 'v1.2', descEn: 'Core scraping plugin supporting multiple platforms.', descZh: '核心线索爬取插件，支持 X/LinkedIn 等平台。', icon: 'Box', color: 'var(--primary)', isActive: true },
     { id: 'plugin-2', name: 'Marketing LLM', version: 'v2.0', descEn: 'Smart marketing copy generation interface.', descZh: '智能营销文案生成模型接口及提示词工程。', icon: 'Bot', color: 'var(--accent)', isActive: true },
@@ -258,6 +350,7 @@ function App() {
     { type: 'email', icon: <Bot size={24} />, color: 'var(--primary)', glow: 'rgba(99,102,241,0.3)', nameZh: '生成个性化开发信', nameEn: 'Generate Cold Email', descZh: '基于客户线索深度定制一封高质量业务开发邮件', descEn: 'Craft a high-quality cold email from lead data', tagZh: '邮件', tagEn: 'Email' },
     { type: 'classify', icon: <Search size={24} />, color: 'var(--accent)', glow: 'rgba(249,115,22,0.3)', nameZh: '批量潜在客户分类', nameEn: 'Batch Lead Scoring', descZh: '使用 AI 对线索意向度评分并分类归档', descEn: 'Score and categorize leads by intent level', tagZh: '评分', tagEn: 'Scoring' },
     { type: 'social', icon: <Sparkles size={24} />, color: 'var(--success)', glow: 'rgba(16,185,129,0.3)', nameZh: 'AI 社交媒体跟进', nameEn: 'AI Social Follow-up', descZh: '生成 Twitter/LinkedIn 高互动跟进私信模板', descEn: 'Generate high-engagement DM templates', tagZh: '社交', tagEn: 'Social' },
+    { type: 'pipeline', icon: <Bot size={24} />, color: '#8b5cf6', glow: 'rgba(139,92,246,0.3)', nameZh: '全自动营销管道', nameEn: 'Full Marketing Pipeline', descZh: 'Research Agent + Chat Agent：深度分析线索，自动生成多渠道营销消息', descEn: 'Research Agent + Chat Agent: analyze leads, generate multi-channel messages', tagZh: '全自动化', tagEn: 'Pipeline' },
   ];
   const marketingCampaigns = [
     { nameZh: '健身器材商家拓客行动', nameEn: 'Fitness Equipment Outreach', statsZh: '已发送 142 封 · 打开率 34%', statsEn: 'Sent 142 · Open 34%', status: 'done', pct: 100 },
@@ -288,9 +381,23 @@ function App() {
     setAnalyticsError('');
     try {
       const token = localStorage.getItem('token');
+      if (!isTokenValid(token)) {
+        if (token) localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        setUser(null);
+        setAnalyticsError(lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again');
+        return;
+      }
       const response = await fetch(`${API_BASE_URL}/api/analytics/`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      if (response.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        setUser(null);
+        setAnalyticsError(lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again');
+        return;
+      }
       const data = await response.json();
       if (data.success === false) {
         setAnalyticsError(data.error || 'Failed to load analytics');
@@ -304,15 +411,19 @@ function App() {
     }
   };
 
-  // Check auth status on mount
+  // Check auth status on mount — client-side JWT expiry check (no network request)
   useEffect(() => {
     const token = localStorage.getItem('token');
-    if (token) {
+    if (isTokenValid(token)) {
+      const payload = parseJwt(token);
       setIsLoggedIn(true);
-      setAuthLoading(false);
+      if (payload?.email) setUser({ email: payload.email });
     } else {
-      setAuthLoading(false);
+      if (token) localStorage.removeItem('token');
+      setIsLoggedIn(false);
+      setUser(null);
     }
+    setAuthLoading(false);
   }, []);
 
   const handleLogin = async (e) => {
@@ -420,6 +531,10 @@ function App() {
 
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        setStatusMsg(lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first');
+        return;
+      }
       // Call the actual scraping endpoint using LeadAgent
       const response = await fetch(
         `${API_BASE_URL}/api/agents/test-scraper`,
@@ -440,6 +555,14 @@ function App() {
         }
       );
 
+      if (response.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        setUser(null);
+        setStatusMsg(lang === 'zh' ? '[错误] 登录已过期，请重新登录' : '[Error] Session expired, please log in again');
+        return;
+      }
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -447,24 +570,23 @@ function App() {
       const result = await response.json();
 
       if (result.status === 'success' && result.data && result.data.length > 0) {
-        setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".`);
+        let sourceInfo = '';
+        if (result.source) {
+          if (result.source.includes('+ddg')) sourceInfo = lang === 'zh' ? ' (通过 DuckDuckGo 搜索)' : ' (via DuckDuckGo)';
+          else if (result.source.includes('+google')) sourceInfo = lang === 'zh' ? ' (通过 Google 搜索)' : ' (via Google)';
+        }
+        setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".${sourceInfo}`);
         setLeads(result.data);
       } else if (result.status === 'error') {
         setStatusMsg(lang === 'zh' ? `[错误] 爬取失败: ${result.message}` : `[Error] Scraping failed: ${result.message}`);
-        // Show demo leads on error for UI demonstration
-        setLeads([
-          { id: 1, platform: platform || 'x', username: `demo_user_${keyword}`, profile_url: `https://example.com/user/${keyword}`, tags: [keyword, 'demo'], followers: Math.floor(Math.random() * 5000) + 500 },
-          { id: 2, platform: platform || 'x', username: `lead_pro_${keyword}`, profile_url: `https://example.com/pro/${keyword}`, tags: [keyword, 'hot'], followers: Math.floor(Math.random() * 10000) + 1000 },
-          { id: 3, platform: platform || 'linkedin', username: `${keyword}_expert`, profile_url: `https://linkedin.com/in/${keyword}`, tags: [keyword, 'verified'], followers: Math.floor(Math.random() * 8000) + 2000 },
-        ]);
+        setLeads([]);
       } else {
-        setStatusMsg(lang === 'zh' ? `[提示] 未找到匹配「${keyword}」的线索，已创建模拟数据用于演示` : `[Info] No leads found for "${keyword}", showing demo data.`);
-        // Show demo leads for UI demonstration
-        setLeads([
-          { id: 1, platform: platform || 'x', username: `demo_user_${keyword}`, profile_url: `https://example.com/user/${keyword}`, tags: [keyword, 'demo'], followers: Math.floor(Math.random() * 5000) + 500 },
-          { id: 2, platform: platform || 'x', username: `lead_pro_${keyword}`, profile_url: `https://example.com/pro/${keyword}`, tags: [keyword, 'hot'], followers: Math.floor(Math.random() * 10000) + 1000 },
-          { id: 3, platform: platform || 'linkedin', username: `${keyword}_expert`, profile_url: `https://linkedin.com/in/${keyword}`, tags: [keyword, 'verified'], followers: Math.floor(Math.random() * 8000) + 2000 },
-        ]);
+        // 真实爬取结果为空
+        const reason = platform === 'x' || platform === 'twitter' || platform === 'linkedin' || platform === 'instagram' || platform === 'facebook'
+          ? (lang === 'zh' ? `${platform} 需要登录才能搜索，请配置 CHROME_USER_DATA_DIR 或 CDP_URL 环境变量` : `${platform} requires login to search. Set CHROME_USER_DATA_DIR or CDP_URL in .env`)
+          : (lang === 'zh' ? `未找到匹配「${keyword}」的线索` : `No leads found for "${keyword}"`);
+        setStatusMsg(`[!] ${reason}`);
+        setLeads([]);
       }
     } catch (err) {
       console.error(err);
@@ -480,24 +602,30 @@ function App() {
     setMarketingResult('');
     
     let prompt = '';
-    const sampleLeads = leads && leads.length > 0 ? JSON.stringify(leads.slice(0, 3)) : '无真实数据（请使用示例假设）';
-    
+    const sampleLeads = leads && leads.length > 0 ? JSON.stringify(leads.slice(0, 3)) : (lang === 'zh' ? '无真实数据（请使用示例假设）' : 'No real data available (use sample examples)');
+
     if (type === 'email') {
       setMarketingActionTitle(lang === 'zh' ? '生成个性化开发信' : 'Generated Cold Email');
-      prompt = `基于以下潜在客户数据，生成一封个性化的业务开发信(Cold Email)：\n\n${sampleLeads}\n\n要求：专业、有吸引力，且能体现出你对他们的了解。如果没客户数据，请生成一个吸引目标领域客户的通用高质量开发信。`;
+      prompt = lang === 'zh'
+        ? `基于以下潜在客户数据，生成一封个性化的业务开发信(Cold Email)：\n\n${sampleLeads}\n\n要求：专业、有吸引力，且能体现出你对他们的了解。如果没客户数据，请生成一个吸引目标领域客户的通用高质量开发信。`
+        : `Based on the following lead data, generate a personalized cold email:\n\n${sampleLeads}\n\nRequirements: professional, engaging, and showing understanding of their needs. If no real data, generate a high-quality generic cold email for the target audience.`;
     } else if (type === 'classify') {
       setMarketingActionTitle(lang === 'zh' ? '批量潜在客户分类' : 'Lead Classification Results');
-      prompt = `请根据以下潜在客户列表，分析他们的意向度和可能感兴趣的产品方向，将其分为“高意向”、“中意向”、“低意向”三类，并给出简明理由：\n\n${sampleLeads}\n\n如果没有真实客户数据，请输出一个包含三个虚构客户的示例分类结果。`;
+      prompt = lang === 'zh'
+        ? `请根据以下潜在客户列表，分析他们的意向度和可能感兴趣的产品方向，将其分为”高意向”、”中意向”、”低意向”三类，并给出简明理由：\n\n${sampleLeads}\n\n如果没有真实客户数据，请输出一个包含三个虚构客户的示例分类结果。`
+        : `Analyze the following leads, classify them into “High Intent”, “Medium Intent”, “Low Intent” categories with brief reasoning:\n\n${sampleLeads}\n\nIf no real data, output a sample classification with three fictional leads.`;
     } else if (type === 'social') {
       setMarketingActionTitle(lang === 'zh' ? 'AI 社交媒体跟进' : 'Social Media Follow-up');
-      prompt = `基于以下客户信息，起草3条可以在社交媒体（如Twitter/LinkedIn）上用来跟进他们或引起他们注意的高互动评论或私信模板：\n\n${sampleLeads}\n\n如果没有客户数据，请生成给目标领域专业人士或KOL的示例通用跟进私信。`;
+      prompt = lang === 'zh'
+        ? `基于以下客户信息，起草3条可以在社交媒体（如Twitter/LinkedIn）上用来跟进他们或引起他们注意的高互动评论或私信模板：\n${sampleLeads}\n\n如果没有客户数据，请生成给目标领域专业人士或KOL的示例通用跟进私信。`
+        : `Based on the following lead info, draft 3 high-engagement social media follow-up messages (for Twitter/LinkedIn):\n\n${sampleLeads}\n\nIf no real data, generate sample follow-up messages for professionals or KOLs in the target industry.`;
     }
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/agents/test-llm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt })
+        body: JSON.stringify({ prompt, language: lang })
       });
       const data = await response.json();
       if (data.status === 'success') {
@@ -509,6 +637,114 @@ function App() {
       setMarketingResult(t.sysErrorNet || 'Network Error, please ensure backend is running.');
     } finally {
       setMarketingLoading(false);
+    }
+  };
+
+  const handlePipelineAction = async () => {
+    if (pipelineLoading) return;
+
+    const token = localStorage.getItem('token');
+    if (!isTokenValid(token)) {
+      setPipelineResult({ error: lang === 'zh' ? '请先登录' : 'Please log in first' });
+      return;
+    }
+
+    if (!leads || leads.length === 0) {
+      setPipelineResult({ error: lang === 'zh' ? '请先在「线索捕获器」中采集线索数据' : 'Please extract leads in the Lead Extractor tab first' });
+      return;
+    }
+
+    setPipelineLoading(true);
+    setPipelineResult(null);
+    setPipelineStep('research');
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agents/marketing-pipeline`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          leads: leads.slice(0, 20),
+          product_context: keyword || '',
+          language: lang === 'zh' ? 'zh' : 'en'
+        })
+      });
+
+      if (response.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        setUser(null);
+        setPipelineResult({ error: lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again' });
+        return;
+      }
+
+      setPipelineStep('chat');
+      const data = await response.json();
+
+      if (data.status === 'success') {
+        setPipelineResult(data);
+      } else {
+        setPipelineResult({ error: data.error || data.message || 'Pipeline failed' });
+      }
+    } catch (err) {
+      setPipelineResult({ error: lang === 'zh' ? '网络错误，请确保后端正在运行' : 'Network error. Please ensure the backend is running.' });
+    } finally {
+      setPipelineLoading(false);
+      setPipelineStep('');
+    }
+  };
+
+  const handleRunSkill = async (skillId) => {
+    if (skillRunning) return;
+
+    const token = localStorage.getItem('token');
+    if (!isTokenValid(token)) {
+      setSkillResult({ skill_id: skillId, error: t.skillLoginRequired });
+      return;
+    }
+
+    if (!skillInput.trim()) {
+      setSkillResult({ skill_id: skillId, error: t.skillInputRequired });
+      return;
+    }
+
+    setSkillRunning(skillId);
+    setSkillResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/agents/execute-skill`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          skill_id: skillId,
+          input_text: skillInput,
+          language: lang === 'zh' ? 'zh' : 'en'
+        })
+      });
+
+      if (response.status === 401) {
+        localStorage.removeItem('token');
+        setIsLoggedIn(false);
+        setUser(null);
+        setSkillResult({ skill_id: skillId, error: t.skillLoginRequired });
+        return;
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setSkillResult({ skill_id: skillId, result: data.result });
+      } else {
+        setSkillResult({ skill_id: skillId, error: data.detail || 'Skill execution failed' });
+      }
+    } catch (err) {
+      setSkillResult({ skill_id: skillId, error: lang === 'zh' ? '网络错误' : 'Network error' });
+    } finally {
+      setSkillRunning(null);
     }
   };
 
@@ -524,7 +760,7 @@ function App() {
       const response = await fetch(`${API_BASE_URL}/api/agents/test-llm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: userMsg.content })
+        body: JSON.stringify({ prompt: userMsg.content, language: lang })
       });
       const data = await response.json();
       
@@ -720,7 +956,8 @@ function App() {
              activeTab === 'leads' ? t.headerLeads :
              activeTab === 'marketing' ? t.tabMarketing :
              activeTab === 'plugins' ? t.tabPlugins :
-             activeTab === 'analytics' ? t.tabAnalytics : t.tabSettings}
+             activeTab === 'analytics' ? t.tabAnalytics :
+             activeTab === 'skills' ? t.tabSkills : t.tabSettings}
           </h1>
           <div style={{ display: 'flex', gap: '1.5rem', alignItems: 'center' }}>
             {isLoggedIn ? (
@@ -1128,9 +1365,9 @@ function App() {
                     {lang === 'zh' ? 'AI 营销动作' : 'AI Marketing Actions'}
                   </h2>
                   {marketingActions.map(a => (
-                    <button key={a.type} onClick={() => handleMarketingAction(a.type)} disabled={marketingLoading}
-                        style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem 1.1rem', background: marketingLoading ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.2)', border: `1px solid rgba(255,255,255,0.07)`, borderRadius: '0.6rem', cursor: marketingLoading ? 'not-allowed': 'pointer', fontFamily: 'inherit', transition: 'all 0.2s', textAlign: 'left', opacity: marketingLoading ? 0.6 : 1, position: 'relative', overflow: 'hidden' }}
-                        onMouseOver={e => { if (!marketingLoading) { e.currentTarget.style.borderColor = a.color + '55'; e.currentTarget.style.background = `${a.glow.replace('0.3', '0.08')}`; }}}
+                    <button key={a.type} onClick={() => a.type === 'pipeline' ? handlePipelineAction() : handleMarketingAction(a.type)} disabled={marketingLoading || pipelineLoading}
+                        style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '1rem 1.1rem', background: (marketingLoading || pipelineLoading) ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.2)', border: `1px solid rgba(255,255,255,0.07)`, borderRadius: '0.6rem', cursor: (marketingLoading || pipelineLoading) ? 'not-allowed': 'pointer', fontFamily: 'inherit', transition: 'all 0.2s', textAlign: 'left', opacity: (marketingLoading || pipelineLoading) ? 0.6 : 1, position: 'relative', overflow: 'hidden' }}
+                        onMouseOver={e => { if (!marketingLoading && !pipelineLoading) { e.currentTarget.style.borderColor = a.color + '55'; e.currentTarget.style.background = `${a.glow.replace('0.3', '0.08')}`; }}}
                         onMouseOut={e => { e.currentTarget.style.borderColor = 'rgba(255,255,255,0.07)'; e.currentTarget.style.background = 'rgba(0,0,0,0.2)'; }}
                       >
                         <div style={{ width: 44, height: 44, borderRadius: '0.5rem', background: `${a.glow.replace('0.3','0.15')}`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: a.color, flexShrink: 0 }}>{a.icon}</div>
@@ -1148,14 +1385,163 @@ function App() {
                     <h2 className="panel-title" style={{ marginBottom: '1rem' }}>
                       <Bot size={18} className="brand-icon" />
                       {lang === 'zh' ? 'AI 生成结果' : 'AI Output'}
-                      {marketingResult && !marketingLoading && (
-                        <button onClick={() => { navigator.clipboard?.writeText(marketingResult); }} style={{ marginLeft: 'auto', fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                      {(marketingResult || (pipelineResult && !pipelineResult.error)) && !marketingLoading && !pipelineLoading && (
+                        <button onClick={() => {
+                          if (pipelineResult && !pipelineResult.error && pipelineResult.results) {
+                            const allText = pipelineResult.results.map(r => {
+                              const lead = r.lead || {};
+                              const research = r.research || {};
+                              const msgList = Array.isArray(r.messages) ? r.messages : [];
+                              const msgs = {};
+                              msgList.forEach(m => { if (m.channel) msgs[m.channel] = m; });
+                              let text = `--- ${lead.username || 'Lead'} (${lead.platform}) ---\nTier: ${research.tier || '?'} | Score: ${research.quality_score || '?'}\n`;
+                              if (msgs.email) text += `\n[Email]\nSubject: ${msgs.email.subject}\n${msgs.email.body}\n`;
+                              if (msgs.linkedin_dm) text += `\n[LinkedIn DM]\n${msgs.linkedin_dm.body}\n`;
+                              if (msgs.twitter_dm) text += `\n[Twitter DM]\n${msgs.twitter_dm.body}\n`;
+                              return text;
+                            }).join('\n\n');
+                            navigator.clipboard?.writeText(allText);
+                          } else if (marketingResult) {
+                            navigator.clipboard?.writeText(marketingResult);
+                          }
+                        }} style={{ marginLeft: 'auto', fontSize: '0.75rem', padding: '0.2rem 0.6rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit' }}>
                           {lang === 'zh' ? '复制' : 'Copy'}
                         </button>
                       )}
                     </h2>
 
-                    {marketingLoading ? (
+                    {pipelineLoading ? (
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
+                        <div style={{ width: 44, height: 44, borderRadius: '50%', border: '3px solid rgba(139,92,246,0.2)', borderTopColor: '#8b5cf6', animation: 'spin 1s linear infinite' }} />
+                        <p style={{ color: '#8b5cf6', fontSize: '0.88rem', fontWeight: 500 }}>
+                          {pipelineStep === 'research' ? t.pipelineResearch : pipelineStep === 'chat' ? t.pipelineChat : t.pipelineRunning}
+                        </p>
+                        <div style={{ display: 'flex', gap: '0.5rem', fontSize: '0.75rem' }}>
+                          <span style={{ color: pipelineStep === 'research' ? '#8b5cf6' : 'var(--text-muted)', fontWeight: pipelineStep === 'research' ? 600 : 400 }}>1. Research</span>
+                          <span style={{ color: 'var(--text-muted)' }}>&rarr;</span>
+                          <span style={{ color: pipelineStep === 'chat' ? '#8b5cf6' : 'var(--text-muted)', fontWeight: pipelineStep === 'chat' ? 600 : 400 }}>2. Chat</span>
+                        </div>
+                      </div>
+                    ) : pipelineResult ? (
+                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                        {pipelineResult.error ? (
+                          <div style={{ padding: '1rem', background: 'rgba(239,68,68,0.1)', borderRadius: '0.5rem', border: '1px solid rgba(239,68,68,0.25)', color: '#fca5a5', fontSize: '0.85rem' }}>
+                            {pipelineResult.error}
+                          </div>
+                        ) : (
+                          <>
+                            {/* Summary bar */}
+                            <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.75rem', flexWrap: 'wrap' }}>
+                              {pipelineResult.summary && (() => {
+                                const tiers = pipelineResult.summary.tier_distribution || {};
+                                const items = [
+                                  { label: t.pipelineHighTier, count: tiers.A || 0, color: '#10b981' },
+                                  { label: t.pipelineMidTier, count: tiers.B || 0, color: '#3b82f6' },
+                                  { label: t.pipelineLowTier, count: tiers.C || 0, color: '#6b7280' },
+                                ];
+                                return items.map((it, i) => (
+                                  <span key={i} style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: `${it.color}22`, color: it.color, border: `1px solid ${it.color}44`, fontWeight: 600 }}>
+                                    {it.label}: {it.count}
+                                  </span>
+                                ));
+                              })()}
+                              {pipelineResult.summary && (
+                                <span style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', fontWeight: 500 }}>
+                                  {pipelineResult.summary.messages_generated || 0} {t.pipelineMessages}
+                                </span>
+                              )}
+                              {pipelineResult.results && (
+                                <button onClick={() => {
+                                  const allText = pipelineResult.results.map(r => {
+                                    const lead = r.lead || {};
+                                    const research = r.research || {};
+                                    const msgList = Array.isArray(r.messages) ? r.messages : [];
+                                    const msgs = {};
+                                    msgList.forEach(m => { if (m.channel) msgs[m.channel] = m; });
+                                    let text = `--- ${lead.username || 'Lead'} (${lead.platform}) ---\nTier: ${research.tier || '?'} | Score: ${research.quality_score || '?'}\nIndustry: ${toArray(research.industry).join(', ')}\n`;
+                                    if (msgs.email) text += `\n[Email]\nSubject: ${msgs.email.subject}\n${msgs.email.body}\nCTA: ${msgs.email.cta}\n`;
+                                    if (msgs.linkedin_dm) text += `\n[LinkedIn DM]\n${msgs.linkedin_dm.body}\n`;
+                                    if (msgs.twitter_dm) text += `\n[Twitter DM]\n${msgs.twitter_dm.body}\n`;
+                                    return text;
+                                  }).join('\n\n');
+                                  navigator.clipboard?.writeText(allText);
+                                }} style={{ marginLeft: 'auto', fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                                  {t.pipelineCopyAll}
+                                </button>
+                              )}
+                            </div>
+
+                            {/* Lead cards */}
+                            <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                              {(pipelineResult.results || []).map((r, i) => {
+                                const lead = r.lead || {};
+                                const research = r.research || {};
+                                const msgList = Array.isArray(r.messages) ? r.messages : [];
+                                const msgs = {};
+                                msgList.forEach(m => { if (m.channel) msgs[m.channel] = m; });
+                                const tierColor = research.tier === 'A' ? '#10b981' : research.tier === 'B' ? '#3b82f6' : '#6b7280';
+                                const isExpanded = expandedLead === i;
+
+                                return (
+                                  <div key={i} style={{ background: 'rgba(0,0,0,0.25)', borderRadius: '0.5rem', border: `1px solid ${isExpanded ? tierColor + '55' : 'rgba(255,255,255,0.06)'}`, transition: 'border-color 0.2s' }}>
+                                    <button onClick={() => setExpandedLead(isExpanded ? null : i)} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.7rem 0.85rem', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: tierColor, flexShrink: 0 }} />
+                                      <div style={{ flex: 1, minWidth: 0 }}>
+                                        <div style={{ color: '#fff', fontSize: '0.85rem', fontWeight: 600 }}>{lead.username || 'Unknown'}</div>
+                                        <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>{lead.platform} &middot; {toArray(research.industry).join(', ') || '-'}</div>
+                                      </div>
+                                      <span style={{ fontSize: '0.68rem', padding: '0.15rem 0.5rem', borderRadius: '1rem', background: `${tierColor}22`, color: tierColor, fontWeight: 600, flexShrink: 0 }}>
+                                        {research.tier === 'A' ? t.pipelineHighTier : research.tier === 'B' ? t.pipelineMidTier : t.pipelineLowTier}
+                                      </span>
+                                      <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', flexShrink: 0 }}>{t.pipelineScore}: {research.quality_score || '?'}</span>
+                                      <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', transition: 'transform 0.2s', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', flexShrink: 0 }}>&#9654;</span>
+                                    </button>
+
+                                    {isExpanded && (
+                                      <div style={{ padding: '0 0.85rem 0.85rem', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '0.6rem' }}>
+                                        {/* Talking points */}
+                                        {toArray(research.talking_points).length > 0 && (
+                                          <div style={{ marginTop: '0.6rem' }}>
+                                            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600, marginBottom: '0.3rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Talking Points</div>
+                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.3rem' }}>
+                                              {toArray(research.talking_points).map((tp, j) => (
+                                                <span key={j} style={{ fontSize: '0.72rem', padding: '0.15rem 0.5rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.05)', color: '#d1d5db' }}>{tp}</span>
+                                              ))}
+                                            </div>
+                                          </div>
+                                        )}
+
+                                        {/* Messages */}
+                                        {[
+                                          { key: 'email', label: t.pipelineEmail, data: msgs.email },
+                                          { key: 'linkedin_dm', label: t.pipelineLinkedIn, data: msgs.linkedin_dm },
+                                          { key: 'twitter_dm', label: t.pipelineTwitter, data: msgs.twitter_dm },
+                                        ].filter(m => m.data).map(m => (
+                                          <div key={m.key} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.65rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.35rem' }}>
+                                              <span style={{ fontSize: '0.72rem', color: '#8b5cf6', fontWeight: 600 }}>{m.label}</span>
+                                              <button onClick={() => {
+                                                const text = m.data.subject ? `Subject: ${m.data.subject}\n\n${m.data.body}\n\nCTA: ${m.data.cta}` : m.data.body;
+                                                navigator.clipboard?.writeText(text);
+                                              }} style={{ fontSize: '0.68rem', padding: '0.1rem 0.4rem', borderRadius: '0.25rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                                                {lang === 'zh' ? '复制' : 'Copy'}
+                                              </button>
+                                            </div>
+                                            {m.data.subject && <div style={{ fontSize: '0.8rem', color: '#fff', fontWeight: 500, marginBottom: '0.25rem' }}>{m.data.subject}</div>}
+                                            <div className="ai-output-markdown" style={{ fontSize: '0.78rem', color: '#d1d5db', lineHeight: 1.55 }}><ReactMarkdown>{m.data.body}</ReactMarkdown></div>
+                                            {m.data.cta && <div style={{ fontSize: '0.72rem', color: 'var(--accent)', marginTop: '0.3rem' }}>CTA: {m.data.cta}</div>}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ) : marketingLoading ? (
                       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '1rem' }}>
                         <div style={{ width: 44, height: 44, borderRadius: '50%', border: '3px solid rgba(99,102,241,0.2)', borderTopColor: 'var(--primary)', animation: 'spin 1s linear infinite' }} />
                         <p style={{ color: 'var(--primary)', fontSize: '0.88rem', fontWeight: 500 }}>{lang === 'zh' ? 'AI 分析处理中，请稍候...' : 'AI is processing...'}</p>
@@ -1166,8 +1552,8 @@ function App() {
                         <div style={{ padding: '0.3rem 0.8rem', background: 'rgba(99,102,241,0.15)', borderRadius: '0.4rem', fontSize: '0.78rem', color: 'var(--primary)', fontWeight: 600, marginBottom: '0.85rem', display: 'inline-flex', alignSelf: 'flex-start', border: '1px solid rgba(99,102,241,0.3)' }}>
                           ✦ {marketingActionTitle}
                         </div>
-                        <div style={{ flex: 1, overflowY: 'auto', whiteSpace: 'pre-wrap', fontSize: '0.88rem', color: '#d1d5db', lineHeight: 1.7, padding: '0.25rem 0' }}>
-                          {marketingResult}
+                        <div className="ai-output-markdown" style={{ flex: 1, overflowY: 'auto', fontSize: '0.88rem', color: '#d1d5db', lineHeight: 1.7, padding: '0.25rem 0' }}>
+                          <ReactMarkdown>{marketingResult}</ReactMarkdown>
                         </div>
                       </div>
                     ) : (
@@ -1427,6 +1813,144 @@ function App() {
               (lang === 'zh' ? s.descZh : s.descEn).toLowerCase().includes(q) ||
               s.tag.toLowerCase().includes(q)
             );
+
+            // Helper to parse result for structured display
+            const renderSkillResult = (result, skillId) => {
+              if (!result) return null;
+              if (result.error) {
+                return <div style={{ padding: '0.75rem', background: 'rgba(239,68,68,0.1)', borderRadius: '0.4rem', border: '1px solid rgba(239,68,68,0.25)', color: '#fca5a5', fontSize: '0.85rem' }}>{result.error}</div>;
+              }
+              const r = result.result;
+              if (!r) return null;
+
+              // Raw output fallback with markdown rendering
+              if (r.raw_output) {
+                return <div className="ai-output-markdown" style={{ fontSize: '0.85rem', color: '#d1d5db', lineHeight: 1.6 }}><ReactMarkdown>{r.raw_output}</ReactMarkdown></div>;
+              }
+
+              // s1: Translations
+              if (skillId === 's1' && r.translations) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {r.translations.map((item, i) => (
+                      <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ fontSize: '0.72rem', color: '#10b981', fontWeight: 600, marginBottom: '0.25rem', textTransform: 'uppercase' }}>{item.lang || item.language || `Lang ${i+1}`}</div>
+                        <div style={{ fontSize: '0.85rem', color: '#d1d5db', lineHeight: 1.5 }}>{item.text || item.translation || item.content || JSON.stringify(item)}</div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+
+              // s2: Competitor Analysis
+              if (skillId === 's2' && r.competitors) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {r.competitors.map((c, i) => (
+                      <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ fontSize: '0.88rem', color: '#fff', fontWeight: 600, marginBottom: '0.35rem' }}>{c.name || c.competitor || `Competitor ${i+1}`}</div>
+                        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                          {(c.strengths || []).map((s, j) => <span key={j} style={{ fontSize: '0.72rem', padding: '0.1rem 0.45rem', borderRadius: '0.3rem', background: 'rgba(16,185,129,0.12)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)' }}>+ {s}</span>)}
+                          {(c.weaknesses || []).map((w, j) => <span key={j} style={{ fontSize: '0.72rem', padding: '0.1rem 0.45rem', borderRadius: '0.3rem', background: 'rgba(239,68,68,0.1)', color: '#fca5a5', border: '1px solid rgba(239,68,68,0.2)' }}>- {w}</span>)}
+                        </div>
+                        {c.opportunities && c.opportunities.length > 0 && (
+                          <div style={{ marginTop: '0.3rem', display: 'flex', gap: '0.3rem', flexWrap: 'wrap' }}>
+                            {c.opportunities.map((o, j) => <span key={j} style={{ fontSize: '0.72rem', padding: '0.1rem 0.45rem', borderRadius: '0.3rem', background: 'rgba(99,102,241,0.12)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.25)' }}>{o}</span>)}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {r.market_trends && r.market_trends.length > 0 && (
+                      <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ fontSize: '0.72rem', color: '#3b82f6', fontWeight: 600, marginBottom: '0.25rem' }}>{lang === 'zh' ? '市场趋势' : 'TRENDS'}</div>
+                        {r.market_trends.map((tr, i) => <div key={i} style={{ fontSize: '0.82rem', color: '#d1d5db' }}>• {tr}</div>)}
+                      </div>
+                    )}
+                    {r.recommendation && <div style={{ fontSize: '0.82rem', color: '#fbbf24', padding: '0.5rem 0.75rem', background: 'rgba(251,191,36,0.08)', borderRadius: '0.4rem', border: '1px solid rgba(251,191,36,0.2)' }}>{r.recommendation}</div>}
+                  </div>
+                );
+              }
+
+              // s3: Subject Lines
+              if (skillId === 's3' && r.subjects) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                    {r.subjects.map((s, i) => (
+                      <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.5rem 0.75rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <span style={{ fontSize: '0.78rem', color: '#8b5cf6', fontWeight: 700, flexShrink: 0, minWidth: '1.5rem', textAlign: 'center' }}>{i + 1}</span>
+                        <span style={{ fontSize: '0.85rem', color: '#d1d5db', flex: 1 }}>{s.text || s.subject || s.line || JSON.stringify(s)}</span>
+                        {s.predicted_open_rate && <span style={{ fontSize: '0.72rem', color: '#10b981', fontWeight: 600, flexShrink: 0 }}>{s.predicted_open_rate}</span>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+
+              // s4: LinkedIn Scripts
+              if (skillId === 's4' && r.scripts) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {r.scripts.map((s, i) => (
+                      <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem' }}>
+                          <span style={{ fontSize: '0.78rem', color: '#8b5cf6', fontWeight: 600 }}>{s.variant || s.type || `Script ${i+1}`}</span>
+                          {s.tone && <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', padding: '0.1rem 0.4rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.05)' }}>{s.tone}</span>}
+                        </div>
+                        {s.opener && <div style={{ fontSize: '0.82rem', color: '#fbbf24', marginBottom: '0.2rem', fontStyle: 'italic' }}>"{s.opener}"</div>}
+                        <div className="ai-output-markdown" style={{ fontSize: '0.82rem', color: '#d1d5db', lineHeight: 1.5 }}><ReactMarkdown>{s.body || s.message || s.text || ''}</ReactMarkdown></div>
+                        {s.cta && <div style={{ fontSize: '0.75rem', color: 'var(--accent)', marginTop: '0.25rem' }}>CTA: {s.cta}</div>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+
+              // s5: A/B Variants
+              if (skillId === 's5' && r.variants) {
+                const variantColors = ['#8b5cf6', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    {r.variants.map((v, i) => (
+                      <div key={i} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.3rem' }}>
+                          <span style={{ fontSize: '0.78rem', color: variantColors[i % variantColors.length], fontWeight: 600 }}>Variant {v.variant_id || v.id || String.fromCharCode(65 + i)}</span>
+                        </div>
+                        <div className="ai-output-markdown" style={{ fontSize: '0.85rem', color: '#d1d5db', lineHeight: 1.5, marginBottom: '0.3rem' }}><ReactMarkdown>{v.text || v.content || v.copy || ''}</ReactMarkdown></div>
+                        {v.change_description && <div style={{ fontSize: '0.75rem', color: '#60a5fa' }}>{lang === 'zh' ? '变更: ' : 'Change: '}{v.change_description}</div>}
+                        {v.hypothesis && <div style={{ fontSize: '0.75rem', color: '#fbbf24' }}>{lang === 'zh' ? '假设: ' : 'Hypothesis: '}{v.hypothesis}</div>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+
+              // s6: Lead Scrubber
+              if (skillId === 's6' && (r.cleaned_leads || r.issues || r.total !== undefined)) {
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                    <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                      {r.total !== undefined && <span style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: 'rgba(255,255,255,0.06)', color: '#d1d5db', border: '1px solid rgba(255,255,255,0.1)', fontWeight: 600 }}>{lang === 'zh' ? '总计' : 'Total'}: {r.total}</span>}
+                      {r.valid !== undefined && <span style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: 'rgba(16,185,129,0.12)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)', fontWeight: 600 }}>{lang === 'zh' ? '有效' : 'Valid'}: {r.valid}</span>}
+                      {r.issues_found !== undefined && <span style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: 'rgba(239,68,68,0.1)', color: '#fca5a5', border: '1px solid rgba(239,68,68,0.2)', fontWeight: 600 }}>{lang === 'zh' ? '问题' : 'Issues'}: {r.issues_found}</span>}
+                      {r.removed !== undefined && <span style={{ fontSize: '0.72rem', padding: '0.2rem 0.6rem', borderRadius: '1rem', background: 'rgba(239,68,68,0.1)', color: '#fca5a5', border: '1px solid rgba(239,68,68,0.2)', fontWeight: 600 }}>{lang === 'zh' ? '已移除' : 'Removed'}: {Array.isArray(r.removed) ? r.removed.length : r.removed}</span>}
+                    </div>
+                    {r.issues && r.issues.length > 0 && (
+                      <div style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.4rem', padding: '0.6rem 0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                        <div style={{ fontSize: '0.72rem', color: '#fca5a5', fontWeight: 600, marginBottom: '0.3rem' }}>{lang === 'zh' ? '发现的问题' : 'ISSUES FOUND'}</div>
+                        {r.issues.map((iss, i) => (
+                          <div key={i} style={{ fontSize: '0.82rem', color: '#d1d5db', marginBottom: '0.2rem' }}>• <span style={{ color: '#fff' }}>{iss.lead || iss.entry || iss.item || `Item ${i+1}`}</span>: {iss.reason || iss.issue || iss.problem || ''}</div>
+                        ))}
+                      </div>
+                    )}
+                    {r.summary && <div style={{ fontSize: '0.82rem', color: '#fbbf24', padding: '0.5rem 0.75rem', background: 'rgba(251,191,36,0.08)', borderRadius: '0.4rem', border: '1px solid rgba(251,191,36,0.2)' }}>{r.summary}</div>}
+                  </div>
+                );
+              }
+
+              // Generic JSON fallback
+              return <pre style={{ fontSize: '0.78rem', color: '#d1d5db', whiteSpace: 'pre-wrap', lineHeight: 1.5, margin: 0, fontFamily: 'monospace' }}>{JSON.stringify(r, null, 2)}</pre>;
+            };
+
             return (
               <div className="glass-panel" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 {/* Header row */}
@@ -1452,32 +1976,84 @@ function App() {
                 <div style={{ marginTop: '0.75rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
                   {lang === 'zh' ? `共 ${filtered.length} / ${skillsAllSkills.length} 个技能可用` : `${filtered.length} / ${skillsAllSkills.length} skills available`}
                 </div>
-                {/* Skill cards grid */}
-                <div className="stats-grid" style={{ marginTop: '1.5rem' }}>
-                  {filtered.length > 0 ? filtered.map(skill => (
-                    <div key={skill.id} className="stat-card" style={{ padding: '1.5rem', background: 'rgba(0,0,0,0.2)', transition: 'transform 0.2s, box-shadow 0.2s' }}
-                      onMouseOver={e => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.boxShadow = `0 8px 24px rgba(0,0,0,0.4)`; }}
-                      onMouseOut={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = ''; }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                          <span style={{ color: skill.color }}>{skillsIconMap[skill.icon] || <Blocks size={20} />}</span>
-                          <span style={{ color: '#fff', fontWeight: 'bold', fontSize: '0.95rem' }}>{lang === 'zh' ? skill.nameZh : skill.nameEn}</span>
-                        </div>
-                        <span style={{ fontSize: '0.72rem', fontWeight: 600, padding: '0.15rem 0.55rem', borderRadius: '1rem', background: 'rgba(255,255,255,0.07)', color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.1)', letterSpacing: '0.05em' }}>{skill.tag}</span>
+                {/* Skill cards */}
+                <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.6rem', overflowY: 'auto', flex: 1 }}>
+                  {filtered.length > 0 ? filtered.map(skill => {
+                    const isExpanded = selectedSkill === skill.id;
+                    const isRunning = skillRunning === skill.id;
+                    const hasResult = skillResult && skillResult.skill_id === skill.id;
+
+                    return (
+                      <div key={skill.id} style={{ background: 'rgba(0,0,0,0.2)', borderRadius: '0.6rem', border: `1px solid ${isExpanded ? skill.color + '44' : 'rgba(255,255,255,0.06)'}`, transition: 'border-color 0.2s' }}>
+                        {/* Card header — clickable */}
+                        <button onClick={() => {
+                          setSelectedSkill(isExpanded ? null : skill.id);
+                          if (!isExpanded) { setSkillResult(null); setSkillInput(''); }
+                        }} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '1rem 1.1rem', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left' }}>
+                          <div style={{ width: 40, height: 40, borderRadius: '0.5rem', background: `${skill.color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: skill.color, flexShrink: 0 }}>
+                            {skillsIconMap[skill.icon] || <Blocks size={20} />}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ color: '#fff', fontWeight: 600, fontSize: '0.9rem' }}>{lang === 'zh' ? skill.nameZh : skill.nameEn}</div>
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.77rem', marginTop: '0.15rem' }}>{lang === 'zh' ? skill.descZh : skill.descEn}</div>
+                          </div>
+                          <span style={{ fontSize: '0.7rem', padding: '0.15rem 0.5rem', borderRadius: '1rem', background: `${skill.color}18`, color: skill.color, fontWeight: 600, flexShrink: 0 }}>{skill.tag}</span>
+                          <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)', transition: 'transform 0.2s', transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', flexShrink: 0 }}>&#9654;</span>
+                        </button>
+
+                        {/* Expanded section */}
+                        {isExpanded && (
+                          <div style={{ padding: '0 1.1rem 1.1rem', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            {/* Input area */}
+                            <div style={{ marginTop: '0.75rem' }}>
+                              <textarea
+                                value={skillInput}
+                                onChange={e => setSkillInput(e.target.value)}
+                                placeholder={t.skillInputPlaceholder}
+                                rows={4}
+                                style={{ width: '100%', background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: '0.4rem', padding: '0.65rem 0.75rem', color: '#d1d5db', fontSize: '0.85rem', fontFamily: 'inherit', resize: 'vertical', lineHeight: 1.5, boxSizing: 'border-box' }}
+                              />
+                            </div>
+
+                            {/* Run button */}
+                            <button
+                              onClick={() => handleRunSkill(skill.id)}
+                              disabled={isRunning}
+                              style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', padding: '0.6rem 1.2rem', background: isRunning ? 'rgba(255,255,255,0.04)' : `${skill.color}20`, color: isRunning ? 'var(--text-muted)' : skill.color, border: `1px solid ${isRunning ? 'rgba(255,255,255,0.08)' : skill.color + '40'}`, borderRadius: '0.4rem', cursor: isRunning ? 'not-allowed' : 'pointer', fontFamily: 'inherit', fontSize: '0.88rem', fontWeight: 600, transition: 'all 0.2s', opacity: isRunning ? 0.7 : 1 }}
+                            >
+                              {isRunning ? (
+                                <>
+                                  <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid rgba(255,255,255,0.1)', borderTopColor: skill.color, animation: 'spin 1s linear infinite' }} />
+                                  {t.skillRunning}
+                                </>
+                              ) : (
+                                <>
+                                  <Activity size={15} />
+                                  {t.skillRun}
+                                </>
+                              )}
+                            </button>
+
+                            {/* Result display */}
+                            {hasResult && (
+                              <div style={{ background: 'rgba(0,0,0,0.15)', borderRadius: '0.5rem', padding: '0.75rem', border: '1px solid rgba(255,255,255,0.04)' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.6rem' }}>
+                                  <span style={{ fontSize: '0.78rem', color: skill.color, fontWeight: 600 }}>{t.skillResult}</span>
+                                  {!skillResult.error && (
+                                    <button onClick={() => { navigator.clipboard?.writeText(JSON.stringify(skillResult.result, null, 2)); }} style={{ fontSize: '0.72rem', padding: '0.1rem 0.5rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit' }}>
+                                      {t.skillCopy}
+                                    </button>
+                                  )}
+                                </div>
+                                {renderSkillResult(skillResult, skill.id)}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
-                      <div style={{ color: 'var(--text-muted)', fontSize: '0.88rem', marginBottom: '1.25rem', minHeight: '40px', lineHeight: 1.55 }}>
-                        {lang === 'zh' ? skill.descZh : skill.descEn}
-                      </div>
-                      <button className="btn" style={{ width: '100%', background: `rgba(${skill.color === 'var(--primary)' ? '99,102,241' : skill.color === 'var(--success)' ? '16,185,129' : skill.color === 'var(--accent)' ? '249,115,22' : '99,102,241'},0.12)`, color: skill.color, border: `1px solid ${skill.color}30`, gap: '0.4rem' }}
-                        onClick={() => alert(lang === 'zh' ? `正在执行：${skill.nameZh}` : `Running: ${skill.nameEn}`)}
-                      >
-                        <Activity size={15} />
-                        {lang === 'zh' ? '执行技能' : 'Run Skill'}
-                      </button>
-                    </div>
-                  )) : (
-                    <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '4rem 2rem', color: 'var(--text-muted)' }}>
+                    );
+                  }) : (
+                    <div style={{ textAlign: 'center', padding: '4rem 2rem', color: 'var(--text-muted)' }}>
                       <Search size={48} style={{ margin: '0 auto 1rem', opacity: 0.15 }} />
                       <p style={{ fontSize: '1rem' }}>{lang === 'zh' ? '没有匹配的技能，请换个关键词试试。' : 'No skills match your search. Try a different keyword.'}</p>
                     </div>
@@ -1628,7 +2204,7 @@ function App() {
           {chatMessages.map((msg, idx) => (
             <div key={idx} className={`chat-bubble ${msg.role === 'user' ? 'user-bubble' : 'ai-bubble'}`}>
               {msg.role === 'assistant' && <Bot size={14} style={{ marginBottom: '0.25rem', opacity: 0.7 }} />}
-              <div className="chat-text">{msg.content}</div>
+              <div className="chat-text"><ReactMarkdown>{msg.content}</ReactMarkdown></div>
             </div>
           ))}
           {isTyping && (

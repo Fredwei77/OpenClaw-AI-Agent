@@ -297,6 +297,14 @@ class BrowserPoolManager:
         if context_id in instance.contexts:
             return context_id, instance.contexts[context_id], instance
 
+        # CDP 模式：使用 Chrome 默认 context（包含登录态 Cookie）
+        if instance.is_connected and instance.browser.contexts:
+            context = instance.browser.contexts[0]
+            instance.contexts[context_id] = context
+            instance.last_used = datetime.now()
+            print(f"[BrowserPool] Acquired default context {context_id} via CDP (has cookies)")
+            return context_id, context, instance
+
         # 创建新的 context
         context_options = {
             "viewport": {"width": 1280, "height": 720},
@@ -336,6 +344,11 @@ class BrowserPoolManager:
         async with self._lock:
             for inst_id, instance in self._browsers.items():
                 if context_id in instance.contexts:
+                    # CDP 模式下不关闭默认 context（是用户的 Chrome 主 context）
+                    if instance.is_connected:
+                        del instance.contexts[context_id]
+                        instance.reference_count = max(0, instance.reference_count - 1)
+                        return
                     try:
                         await instance.contexts[context_id].close()
                     except Exception as e:
