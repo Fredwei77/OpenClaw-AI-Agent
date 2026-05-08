@@ -19,7 +19,7 @@
 |-----------|----------------|---------------------|
 | 🛒 Shopify / Amazon Seller | Expensive traffic, don't know where to find customers | AI discovers qualified leads from X/Twitter/LinkedIn automatically |
 | 🌍 B2B Export Sales | Low efficiency in lead development, poor response rates | Personalized AI messages, 24/7 automated outreach |
-| 📈 E-commerce Team | Multiple accounts，容易关联被封，容易关联被封 | Isolated browser environments + smart rotation, ban-proof |
+| 📈 E-commerce Team | Multiple accounts，Easy to be blocked | Isolated browser environments + smart rotation, ban-proof |
 | 💰 Indie Hacker / Solopreneur | No time for social media marketing | AI Agent handles content posting and responses automatically |
 
 ---
