@@ -248,4 +248,5 @@ Questions? → [Open an Issue](https://github.com/Fredwei77/OpenClaw-AI-Agent/is
 支持我
 ----------
 如果您觉得这个项目对您有帮助，您可以扫描以下二维码进行捐赠：
-<img width="633" height="795" alt="zhifubao" src="https://github.com/user-attachments/assets/ecae1c5f-b224-49bf-8b91-18241c7fd455" />
+<img width="311" height="391" alt="zhifubao" src="https://github.com/user-attachments/assets/0e2b8e08-c6cc-423e-af0b-e2a7977e6917" />
+
