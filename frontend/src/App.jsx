@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
-import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle, RefreshCw, Trash2, Eye } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 
@@ -223,10 +223,15 @@ function App() {
   const [isScraping, setIsScraping] = useState(false);
   const [leads, setLeads] = useState([]);
   const [statusMsg, setStatusMsg] = useState('');
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadsSearch, setLeadsSearch] = useState('');
+  const [leadStatusFilter, setLeadStatusFilter] = useState('');
+  const [leadTotal, setLeadTotal] = useState(0);
+  const [leadDetails, setLeadDetails] = useState(null);
 
   // Auth State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [user, setUser] = useState(null);
+  const [, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginError, setLoginError] = useState('');
   const [loginEmail, setLoginEmail] = useState('');
@@ -244,6 +249,9 @@ function App() {
   const [pipelineResult, setPipelineResult] = useState(null);
   const [pipelineStep, setPipelineStep] = useState('');
   const [expandedLead, setExpandedLead] = useState(null);
+  const [marketingCampaigns, setMarketingCampaigns] = useState([]);
+  const [campaignsLoading, setCampaignsLoading] = useState(false);
+  const [campaignsError, setCampaignsError] = useState('');
 
   // i18n Language State
   const [lang, setLang] = useState('zh');
@@ -276,14 +284,10 @@ function App() {
     { id: 'plugin-5', name: 'GitHub Repo Monitor', version: 'v0.9', descEn: 'Extract tech leads from stargazers and issues.', descZh: '从 Stargazers 或特定 Issue 中挖掘技术选型客户。', icon: 'Blocks', color: '#facc15', isActive: false }
   ]);
 
-  // Settings State
-  const [apiKey, setApiKey] = useState('sk-proj-xxxxxxxxxxxxxxxxxxxxxxxx');
-  const [isChangingKey, setIsChangingKey] = useState(false);
-  const [selectedLlm, setSelectedLlm] = useState('GLM-4-Plus (Zhipu)');
-  const [concurrentLimit, setConcurrentLimit] = useState(5);
-  const [webhookUrl, setWebhookUrl] = useState('https://your-domain.com/api/webhook');
-  const [isTestingWebhook, setIsTestingWebhook] = useState(false);
-  const [webhookSuccess, setWebhookSuccess] = useState(false);
+  // Runtime status is read-only: local configuration is managed through .env.
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [systemStatusLoading, setSystemStatusLoading] = useState(false);
+  const [systemStatusError, setSystemStatusError] = useState('');
 
   // Lead Scraper Extended Params
   const [selectedGeo, setSelectedGeo] = useState('all');
@@ -298,17 +302,19 @@ function App() {
     { labelZh: '执行技能模块', labelEn: 'Run Skill Module', icon: <Sparkles size={18} />, color: '#8b5cf6', tab: 'skills' },
     { labelZh: '管理插件生态', labelEn: 'Manage Plugins', icon: <Blocks size={18} />, color: 'var(--success)', tab: 'plugins' },
   ];
+  const runtimeTime = systemStatus?.updated_at ? new Date(systemStatus.updated_at).toLocaleTimeString() : '--:--:--';
+  const componentReady = systemStatus?.components || {};
   const dashboardSystemLogs = [
-    { time: '12:07:02', msg: lang === 'zh' ? '[系统] FastAPI 服务已就绪，监听 0.0.0.0:8000' : '[System] FastAPI ready on 0.0.0.0:8000', type: 'success' },
-    { time: '12:06:58', msg: lang === 'zh' ? '[代理] Marketing LLM 插件已加载 (v2.0)' : '[Agent] Marketing LLM Plugin loaded (v2.0)', type: 'info' },
-    { time: '12:06:55', msg: lang === 'zh' ? '[系统] 数据库连接池初始化，最大并发: 10' : '[System] DB pool init, max_conn: 10', type: 'info' },
-    { time: '12:06:50', msg: lang === 'zh' ? '[系统] 加载环境变量完成' : '[System] Env variables loaded', type: 'success' },
-    { time: '12:06:48', msg: lang === 'zh' ? '[系统] 启动 Uvicorn 服务器...' : '[System] Starting Uvicorn server...', type: 'info' },
+    { time: runtimeTime, msg: lang === 'zh' ? `[系统] 工作台状态: ${systemStatus?.status || '正在加载'}` : `[System] Workbench status: ${systemStatus?.status || 'loading'}`, type: systemStatus?.status === 'healthy' ? 'success' : 'info' },
+    { time: runtimeTime, msg: lang === 'zh' ? `[数据库] PostgreSQL ${componentReady.database ? '已连接' : '未就绪'}` : `[Database] PostgreSQL ${componentReady.database ? 'connected' : 'not ready'}`, type: componentReady.database ? 'success' : 'info' },
+    { time: runtimeTime, msg: lang === 'zh' ? `[队列] 等待 ${systemStatus?.task_queue?.queue_size ?? '-'} · 执行中 ${systemStatus?.task_queue?.active_tasks ?? '-'}` : `[Queue] pending ${systemStatus?.task_queue?.queue_size ?? '-'} · active ${systemStatus?.task_queue?.active_tasks ?? '-'}`, type: componentReady.task_queue ? 'success' : 'info' },
+    { time: runtimeTime, msg: lang === 'zh' ? `[浏览器池] ${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} 实例` : `[Browser pool] ${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} instances`, type: componentReady.browser_pool ? 'success' : 'info' },
+    { time: runtimeTime, msg: lang === 'zh' ? `[AI] ${systemStatus?.ai?.mode === 'online' ? `OpenRouter 在线 · ${systemStatus.ai.marketing_model}` : '本地回退模式'}` : `[AI] ${systemStatus?.ai?.mode === 'online' ? `OpenRouter online · ${systemStatus.ai.marketing_model}` : 'local fallback mode'}`, type: systemStatus?.ai?.configured ? 'success' : 'info' },
   ];
   const dashboardAgents = [
-    { nameZh: '线索提取特工', nameEn: 'Lead Extractor', status: 'idle', descZh: '等待任务部署', descEn: 'Awaiting deployment', color: 'var(--text-muted)' },
-    { nameZh: '营销文案智能体', nameEn: 'Marketing Copywriter', status: 'active', descZh: '就绪，等待触发', descEn: 'Ready, awaiting trigger', color: 'var(--success)' },
-    { nameZh: 'LLM 路由核心', nameEn: 'LLM Router', status: 'active', descZh: '已连接 OpenRouter', descEn: 'Connected to OpenRouter', color: 'var(--success)' },
+    { nameZh: '线索提取队列', nameEn: 'Lead Extraction Queue', status: componentReady.task_queue ? 'active' : 'idle', descZh: `等待 ${systemStatus?.task_queue?.queue_size ?? '-'} · 执行中 ${systemStatus?.task_queue?.active_tasks ?? '-'}`, descEn: `Pending ${systemStatus?.task_queue?.queue_size ?? '-'} · Active ${systemStatus?.task_queue?.active_tasks ?? '-'}`, color: componentReady.task_queue ? 'var(--success)' : 'var(--text-muted)' },
+    { nameZh: 'Playwright 浏览器池', nameEn: 'Playwright Browser Pool', status: componentReady.browser_pool ? 'active' : 'idle', descZh: `${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} 个实例`, descEn: `${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} instances`, color: componentReady.browser_pool ? 'var(--success)' : 'var(--text-muted)' },
+    { nameZh: 'LLM 路由核心', nameEn: 'LLM Router', status: systemStatus?.ai?.configured ? 'active' : 'idle', descZh: systemStatus?.ai?.configured ? '已连接 OpenRouter' : '本地回退模式', descEn: systemStatus?.ai?.configured ? 'Connected to OpenRouter' : 'Local fallback mode', color: systemStatus?.ai?.configured ? 'var(--success)' : '#f59e0b' },
   ];
 
   // Leads Tab Data
@@ -352,11 +358,6 @@ function App() {
     { type: 'social', icon: <Sparkles size={24} />, color: 'var(--success)', glow: 'rgba(16,185,129,0.3)', nameZh: 'AI 社交媒体跟进', nameEn: 'AI Social Follow-up', descZh: '生成 Twitter/LinkedIn 高互动跟进私信模板', descEn: 'Generate high-engagement DM templates', tagZh: '社交', tagEn: 'Social' },
     { type: 'pipeline', icon: <Bot size={24} />, color: '#8b5cf6', glow: 'rgba(139,92,246,0.3)', nameZh: '全自动营销管道', nameEn: 'Full Marketing Pipeline', descZh: 'Research Agent + Chat Agent：深度分析线索，自动生成多渠道营销消息', descEn: 'Research Agent + Chat Agent: analyze leads, generate multi-channel messages', tagZh: '全自动化', tagEn: 'Pipeline' },
   ];
-  const marketingCampaigns = [
-    { nameZh: '健身器材商家拓客行动', nameEn: 'Fitness Equipment Outreach', statsZh: '已发送 142 封 · 打开率 34%', statsEn: 'Sent 142 · Open 34%', status: 'done', pct: 100 },
-    { nameZh: 'Shopify 独立站站长邀约', nameEn: 'Shopify Store Owner Invites', statsZh: '已触达 58 人 · 回复 12 人', statsEn: 'Reached 58 · Replies 12', status: 'running', pct: 62 },
-    { nameZh: 'SaaS 工具订阅推广', nameEn: 'SaaS Tool Subscription Drive', statsZh: '排队中 · 待发送 230 封', statsEn: 'Queued · 230 emails pending', status: 'queued', pct: 0 },
-  ];
   const marketingStatusStyle = { done: { bg: 'rgba(16,185,129,0.15)', color: 'var(--success)', border: 'rgba(16,185,129,0.35)' }, running: { bg: 'rgba(59,130,246,0.15)', color: '#60a5fa', border: 'rgba(59,130,246,0.35)' }, queued: { bg: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)', border: 'rgba(255,255,255,0.1)' } };
 
   // Skills Tab Data
@@ -376,7 +377,7 @@ function App() {
   const [analyticsError, setAnalyticsError] = useState('');
 
   // Fetch analytics data
-  const fetchAnalytics = async () => {
+  const fetchAnalytics = useCallback(async () => {
     setAnalyticsLoading(true);
     setAnalyticsError('');
     try {
@@ -404,12 +405,50 @@ function App() {
       } else {
         setAnalyticsData(data);
       }
-    } catch (err) {
+    } catch {
       setAnalyticsError(lang === 'zh' ? '网络错误' : 'Network error');
     } finally {
       setAnalyticsLoading(false);
     }
-  };
+  }, [lang]);
+
+  const fetchSystemStatus = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!isTokenValid(token)) return;
+    setSystemStatusLoading(true);
+    setSystemStatusError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/system/status`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || data.detail || 'Failed to load runtime status');
+      setSystemStatus(data);
+    } catch (err) {
+      setSystemStatusError(err.message || (lang === 'zh' ? '无法读取运行状态' : 'Unable to load runtime status'));
+    } finally {
+      setSystemStatusLoading(false);
+    }
+  }, [lang]);
+
+  const fetchMarketingCampaigns = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!isTokenValid(token)) return;
+    setCampaignsLoading(true);
+    setCampaignsError('');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/outreach/campaigns?limit=10`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || data.detail || 'Failed to load campaigns');
+      setMarketingCampaigns(data.campaigns || []);
+    } catch (err) {
+      setCampaignsError(err.message || (lang === 'zh' ? '无法读取营销活动' : 'Unable to load campaigns'));
+    } finally {
+      setCampaignsLoading(false);
+    }
+  }, [lang]);
 
   // Check auth status on mount — client-side JWT expiry check (no network request)
   useEffect(() => {
@@ -490,14 +529,117 @@ function App() {
     setUser(null);
     setLeads([]);
     setAnalyticsData(null);
+    setSystemStatus(null);
+    setMarketingCampaigns([]);
+    setLeadDetails(null);
   };
 
-  // Fetch analytics when tab changes to analytics
+  const fetchLeads = useCallback(async () => {
+    const token = localStorage.getItem('token');
+    if (!isTokenValid(token)) return;
+    setLeadsLoading(true);
+    try {
+      const params = new URLSearchParams({ page_size: '100' });
+      if (leadsSearch.trim()) params.set('search', leadsSearch.trim());
+      if (leadStatusFilter) params.set('status', leadStatusFilter);
+      const response = await fetch(`${API_BASE_URL}/api/leads/?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to load leads');
+      setLeads(data.leads || []);
+      setLeadTotal(data.total || 0);
+    } catch (err) {
+      setStatusMsg(`[Error] ${err.message || 'Failed to load leads'}`);
+    } finally {
+      setLeadsLoading(false);
+    }
+  }, [leadStatusFilter, leadsSearch]);
+
+  const fetchLeadDetails = async (leadId) => {
+    const token = localStorage.getItem('token');
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to load lead details');
+      setLeadDetails(data);
+    } catch (err) {
+      setStatusMsg(`[Error] ${err.message || 'Failed to load lead details'}`);
+    }
+  };
+
+  const updateLeadStatus = async (leadId, status) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setStatusMsg(`[Error] ${data.error || 'Failed to update lead'}`);
+      return;
+    }
+    setLeads(prev => prev.map(lead => lead.id === leadId ? data : lead));
+    if (leadDetails?.id === leadId) setLeadDetails(prev => ({ ...prev, status: data.status }));
+  };
+
+  const deleteLead = async (leadId) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!response.ok) {
+      const data = await response.json();
+      setStatusMsg(`[Error] ${data.error || 'Failed to delete lead'}`);
+      return;
+    }
+    setLeadDetails(prev => prev?.id === leadId ? null : prev);
+    await fetchLeads();
+  };
+
+  const updateDraftStatus = async (messageId, status) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`${API_BASE_URL}/api/outreach/${messageId}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      setStatusMsg(`[Error] ${data.error || 'Failed to update draft'}`);
+      return;
+    }
+    setLeadDetails(prev => ({
+      ...prev,
+      marketing_messages: prev.marketing_messages.map(message => message.id === messageId ? data : message)
+    }));
+  };
+
   useEffect(() => {
-    if (activeTab === 'analytics') {
+    if (isLoggedIn) fetchLeads();
+  }, [isLoggedIn, fetchLeads]);
+
+  // Dashboard and analytics share the persisted workspace summary.
+  useEffect(() => {
+    if (isLoggedIn && (activeTab === 'analytics' || activeTab === 'dashboard')) {
       fetchAnalytics();
     }
-  }, [activeTab, lang]);
+  }, [activeTab, fetchAnalytics, isLoggedIn]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return undefined;
+    fetchSystemStatus();
+    const interval = setInterval(fetchSystemStatus, 30000);
+    return () => clearInterval(interval);
+  }, [fetchSystemStatus, isLoggedIn]);
+
+  useEffect(() => {
+    if (isLoggedIn && activeTab === 'marketing') fetchMarketingCampaigns();
+  }, [activeTab, fetchMarketingCampaigns, isLoggedIn]);
 
   const chatEndRef = useRef(null);
 
@@ -527,7 +669,6 @@ function App() {
     }
     setIsScraping(true);
     setStatusMsg(`${t.sysInit}${platform}...`);
-    setLeads([]);
 
     try {
       const token = localStorage.getItem('token');
@@ -576,17 +717,17 @@ function App() {
           else if (result.source.includes('+google')) sourceInfo = lang === 'zh' ? ' (通过 Google 搜索)' : ' (via Google)';
         }
         setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".${sourceInfo}`);
-        setLeads(result.data);
+        await fetchLeads();
       } else if (result.status === 'error') {
         setStatusMsg(lang === 'zh' ? `[错误] 爬取失败: ${result.message}` : `[Error] Scraping failed: ${result.message}`);
-        setLeads([]);
       } else {
         // 真实爬取结果为空
         const reason = platform === 'x' || platform === 'twitter' || platform === 'linkedin' || platform === 'instagram' || platform === 'facebook'
-          ? (lang === 'zh' ? `${platform} 需要登录才能搜索，请配置 CHROME_USER_DATA_DIR 或 CDP_URL 环境变量` : `${platform} requires login to search. Set CHROME_USER_DATA_DIR or CDP_URL in .env`)
+          ? (lang === 'zh'
+            ? `${platform} 需要登录才能搜索。请先用 Chrome 浏览器登录 ${platform}，然后重启应用重试。若仍失败，可在 .env 中手动配置 CHROME_USER_DATA_DIR 或 CDP_URL`
+            : `${platform} requires login. Log in to ${platform} in Chrome first, then restart the app. If it still fails, set CHROME_USER_DATA_DIR or CDP_URL in .env`)
           : (lang === 'zh' ? `未找到匹配「${keyword}」的线索` : `No leads found for "${keyword}"`);
         setStatusMsg(`[!] ${reason}`);
-        setLeads([]);
       }
     } catch (err) {
       console.error(err);
@@ -600,40 +741,43 @@ function App() {
     if (marketingLoading) return;
     setMarketingLoading(true);
     setMarketingResult('');
-    
-    let prompt = '';
-    const sampleLeads = leads && leads.length > 0 ? JSON.stringify(leads.slice(0, 3)) : (lang === 'zh' ? '无真实数据（请使用示例假设）' : 'No real data available (use sample examples)');
-
-    if (type === 'email') {
-      setMarketingActionTitle(lang === 'zh' ? '生成个性化开发信' : 'Generated Cold Email');
-      prompt = lang === 'zh'
-        ? `基于以下潜在客户数据，生成一封个性化的业务开发信(Cold Email)：\n\n${sampleLeads}\n\n要求：专业、有吸引力，且能体现出你对他们的了解。如果没客户数据，请生成一个吸引目标领域客户的通用高质量开发信。`
-        : `Based on the following lead data, generate a personalized cold email:\n\n${sampleLeads}\n\nRequirements: professional, engaging, and showing understanding of their needs. If no real data, generate a high-quality generic cold email for the target audience.`;
-    } else if (type === 'classify') {
-      setMarketingActionTitle(lang === 'zh' ? '批量潜在客户分类' : 'Lead Classification Results');
-      prompt = lang === 'zh'
-        ? `请根据以下潜在客户列表，分析他们的意向度和可能感兴趣的产品方向，将其分为”高意向”、”中意向”、”低意向”三类，并给出简明理由：\n\n${sampleLeads}\n\n如果没有真实客户数据，请输出一个包含三个虚构客户的示例分类结果。`
-        : `Analyze the following leads, classify them into “High Intent”, “Medium Intent”, “Low Intent” categories with brief reasoning:\n\n${sampleLeads}\n\nIf no real data, output a sample classification with three fictional leads.`;
-    } else if (type === 'social') {
-      setMarketingActionTitle(lang === 'zh' ? 'AI 社交媒体跟进' : 'Social Media Follow-up');
-      prompt = lang === 'zh'
-        ? `基于以下客户信息，起草3条可以在社交媒体（如Twitter/LinkedIn）上用来跟进他们或引起他们注意的高互动评论或私信模板：\n${sampleLeads}\n\n如果没有客户数据，请生成给目标领域专业人士或KOL的示例通用跟进私信。`
-        : `Based on the following lead info, draft 3 high-engagement social media follow-up messages (for Twitter/LinkedIn):\n\n${sampleLeads}\n\nIf no real data, generate sample follow-up messages for professionals or KOLs in the target industry.`;
-    }
+    const titles = {
+      email: lang === 'zh' ? '生成个性化开发信' : 'Generated Cold Email',
+      classify: lang === 'zh' ? '批量潜在客户分类' : 'Lead Classification Results',
+      social: lang === 'zh' ? 'AI 社交媒体跟进' : 'Social Media Follow-up'
+    };
+    setMarketingActionTitle(titles[type]);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/agents/test-llm`, {
+      const token = localStorage.getItem('token');
+      if (!isTokenValid(token)) {
+        setMarketingResult(lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first');
+        return;
+      }
+      if (!leads || leads.length === 0) {
+        setMarketingResult(lang === 'zh' ? '[错误] 请先在线索捕获器中采集线索。' : '[Error] Extract leads before running a marketing action.');
+        return;
+      }
+      const response = await fetch(`${API_BASE_URL}/api/agents/marketing-action`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, language: lang })
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          action: type,
+          lead_ids: leads.slice(0, type === 'email' ? 1 : 10).map(lead => lead.id),
+          product_context: keyword || '',
+          language: lang
+        })
       });
       const data = await response.json();
-      if (data.status === 'success') {
-        setMarketingResult(data.reply);
+      if (response.ok && data.status === 'success') {
+        setMarketingResult(data.content);
       } else {
-        setMarketingResult(`[Error] ${data.message}`);
+        setMarketingResult(`[Error] ${data.error || data.message || 'Marketing action failed'}`);
       }
-    } catch (err) {
+    } catch {
       setMarketingResult(t.sysErrorNet || 'Network Error, please ensure backend is running.');
     } finally {
       setMarketingLoading(false);
@@ -666,7 +810,7 @@ function App() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          leads: leads.slice(0, 20),
+          lead_ids: leads.slice(0, 20).map(lead => lead.id),
           product_context: keyword || '',
           language: lang === 'zh' ? 'zh' : 'en'
         })
@@ -685,10 +829,11 @@ function App() {
 
       if (data.status === 'success') {
         setPipelineResult(data);
+        await fetchMarketingCampaigns();
       } else {
         setPipelineResult({ error: data.error || data.message || 'Pipeline failed' });
       }
-    } catch (err) {
+    } catch {
       setPipelineResult({ error: lang === 'zh' ? '网络错误，请确保后端正在运行' : 'Network error. Please ensure the backend is running.' });
     } finally {
       setPipelineLoading(false);
@@ -741,7 +886,7 @@ function App() {
       } else {
         setSkillResult({ skill_id: skillId, error: data.detail || 'Skill execution failed' });
       }
-    } catch (err) {
+    } catch {
       setSkillResult({ skill_id: skillId, error: lang === 'zh' ? '网络错误' : 'Network error' });
     } finally {
       setSkillRunning(null);
@@ -757,9 +902,17 @@ function App() {
     setIsTyping(true);
 
     try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first' }]);
+        return;
+      }
       const response = await fetch(`${API_BASE_URL}/api/agents/test-llm`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({ prompt: userMsg.content, language: lang })
       });
       const data = await response.json();
@@ -769,7 +922,7 @@ function App() {
       } else {
         setChatMessages(prev => [...prev, { role: 'assistant', content: `[Error] ${data.message}` }]);
       }
-    } catch (err) {
+    } catch {
       setChatMessages(prev => [...prev, { role: 'assistant', content: t.sysError }]);
     } finally {
       setIsTyping(false);
@@ -794,17 +947,6 @@ function App() {
     p.descEn.toLowerCase().includes(pluginSearchQuery.toLowerCase()) ||
     p.descZh.toLowerCase().includes(pluginSearchQuery.toLowerCase())
   );
-
-  const handleTestWebhook = () => {
-    setIsTestingWebhook(true);
-    setWebhookSuccess(false);
-    // Simulate network delay
-    setTimeout(() => {
-      setIsTestingWebhook(false);
-      setWebhookSuccess(true);
-      setTimeout(() => setWebhookSuccess(false), 3000);
-    }, 1500);
-  };
 
   const handleInstallPlugin = (plugin) => {
     setPlugins(prev => [...prev, { ...plugin, isActive: true }]);
@@ -1007,8 +1149,11 @@ function App() {
               <Globe size={16} />
               {lang === 'zh' ? 'English' : '中文'}
             </button>
-            <div className="status-indicator">
-              <span className="pulse"></span> {t.serverIntegrity}
+            <div className="status-indicator" title={systemStatusError || systemStatus?.status || ''}>
+              <span className="pulse" style={{ background: systemStatus?.status === 'healthy' ? 'var(--success)' : '#f59e0b' }}></span>
+              {systemStatus?.status === 'healthy'
+                ? (lang === 'zh' ? '服务正常' : 'Server Healthy')
+                : (lang === 'zh' ? '状态检查中' : 'Checking Status')}
             </div>
           </div>
         </header>
@@ -1019,10 +1164,10 @@ function App() {
                 {/* ── Row 1: Stat Cards ── */}
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '1rem' }}>
                   {[
-                    { labelZh: '已提取线索', labelEn: 'Leads Extracted', value: leads.length, sub: lang === 'zh' ? '本次会话' : 'this session', icon: <Users size={20} />, color: 'var(--primary)', glow: 'rgba(99,102,241,0.3)' },
-                    { labelZh: '系统健康度', labelEn: 'System Health', value: lang === 'zh' ? '极佳' : 'Optimal', sub: 'uptime 100%', icon: <Activity size={20} />, color: 'var(--success)', glow: 'rgba(16,185,129,0.3)' },
-                    { labelZh: '活跃代理数', labelEn: 'Active Agents', value: '2', sub: '/ 3 total', icon: <Bot size={20} />, color: 'var(--accent)', glow: 'rgba(249,115,22,0.3)' },
-                    { labelZh: '可用技能', labelEn: 'Skills Available', value: '6', sub: lang === 'zh' ? '全部就绪' : 'all ready', icon: <Sparkles size={20} />, color: '#8b5cf6', glow: 'rgba(139,92,246,0.3)' },
+                    { labelZh: '已提取线索', labelEn: 'Leads Extracted', value: analyticsData?.dashboard?.total_leads ?? leadTotal, sub: lang === 'zh' ? `近 7 天 +${analyticsData?.dashboard?.new_leads_this_week ?? 0}` : `+${analyticsData?.dashboard?.new_leads_this_week ?? 0} in 7 days`, icon: <Users size={20} />, color: 'var(--primary)', glow: 'rgba(99,102,241,0.3)' },
+                    { labelZh: '系统健康度', labelEn: 'System Health', value: systemStatus?.status === 'healthy' ? (lang === 'zh' ? '正常' : 'Healthy') : (lang === 'zh' ? '检查中' : 'Checking'), sub: systemStatus?.environment || 'development', icon: <Activity size={20} />, color: systemStatus?.status === 'healthy' ? 'var(--success)' : '#f59e0b', glow: 'rgba(16,185,129,0.3)' },
+                    { labelZh: '活动任务', labelEn: 'Active Tasks', value: analyticsData?.dashboard?.active_tasks ?? systemStatus?.task_queue?.active_tasks ?? 0, sub: lang === 'zh' ? `队列等待 ${systemStatus?.task_queue?.queue_size ?? 0}` : `${systemStatus?.task_queue?.queue_size ?? 0} queued`, icon: <Bot size={20} />, color: 'var(--accent)', glow: 'rgba(249,115,22,0.3)' },
+                    { labelZh: 'AI 生成模式', labelEn: 'AI Generation', value: systemStatus?.ai?.configured ? 'Online' : 'Local', sub: systemStatus?.ai?.configured ? 'OpenRouter' : (lang === 'zh' ? '本地回退' : 'fallback'), icon: <Sparkles size={20} />, color: '#8b5cf6', glow: 'rgba(139,92,246,0.3)' },
                   ].map((card, i) => (
                     <div key={i} className="stat-card" style={{ padding: '1.25rem 1.5rem', background: 'rgba(0,0,0,0.25)', position: 'relative', overflow: 'hidden' }}>
                       <div style={{ position: 'absolute', top: 0, right: 0, width: 80, height: 80, borderRadius: '50%', background: card.glow, filter: 'blur(28px)', transform: 'translate(20px,-20px)' }} />
@@ -1234,7 +1379,7 @@ function App() {
                           {leadsPlatforms.find(p => p.value === platform)?.labelEn || platform}
                         </span>
                         <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(16,185,129,0.12)', color: 'var(--success)' }}>
-                          "{keyword}"
+                          &quot;{keyword}&quot;
                         </span>
                         {selectedGeo !== 'all' && (
                           <span style={{ padding: '0.2rem 0.5rem', borderRadius: '0.25rem', background: 'rgba(245,158,11,0.12)', color: '#f59e0b' }}>
@@ -1296,12 +1441,34 @@ function App() {
                     )}
                   </div>
 
+                  <div style={{ display: 'flex', gap: '0.6rem', marginBottom: '1rem', alignItems: 'center' }}>
+                    <input
+                      className="input-field"
+                      value={leadsSearch}
+                      onChange={e => setLeadsSearch(e.target.value)}
+                      placeholder={lang === 'zh' ? '搜索用户名或邮箱' : 'Search username or email'}
+                      style={{ flex: 1, padding: '0.55rem 0.8rem' }}
+                    />
+                    <select className="input-field" value={leadStatusFilter} onChange={e => setLeadStatusFilter(e.target.value)} style={{ padding: '0.55rem 0.8rem' }}>
+                      <option value="">{lang === 'zh' ? '全部状态' : 'All statuses'}</option>
+                      <option value="new">New</option>
+                      <option value="contacted">Contacted</option>
+                      <option value="qualified">Qualified</option>
+                      <option value="converted">Converted</option>
+                      <option value="lost">Lost</option>
+                    </select>
+                    <button className="btn" onClick={fetchLeads} disabled={leadsLoading} style={{ padding: '0.55rem 0.8rem', gap: '0.35rem' }}>
+                      <RefreshCw size={14} className={leadsLoading ? 'loading-spinner' : ''} />
+                      {leadTotal}
+                    </button>
+                  </div>
+
                   {leads.length > 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', overflowY: 'auto' }}>
                       {leads.map((lead, idx) => {
                         const platformColor = lead.platform === 'x' ? '#1d9bf0' : lead.platform === 'linkedin' ? '#0a66c2' : '#96bf48';
                         return (
-                          <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.9rem 1.1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)', transition: 'border-color 0.2s' }}
+                          <div key={lead.id || idx} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)', transition: 'border-color 0.2s' }}
                             onMouseOver={e => e.currentTarget.style.borderColor = 'rgba(99,102,241,0.35)'}
                             onMouseOut={e => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.05)'}
                           >
@@ -1321,6 +1488,15 @@ function App() {
                                 <span key={ti} style={{ fontSize: '0.7rem', padding: '0.15rem 0.45rem', borderRadius: '0.25rem', background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.08)' }}>{tag}</span>
                               ))}
                             </div>
+                            <select value={lead.status || 'new'} onChange={e => updateLeadStatus(lead.id, e.target.value)} className="input-field" style={{ padding: '0.3rem 0.45rem', fontSize: '0.72rem' }}>
+                              <option value="new">New</option>
+                              <option value="contacted">Contacted</option>
+                              <option value="qualified">Qualified</option>
+                              <option value="converted">Converted</option>
+                              <option value="lost">Lost</option>
+                            </select>
+                            <button title="Details" onClick={() => fetchLeadDetails(lead.id)} style={{ color: 'var(--primary)', background: 'transparent', border: 0, cursor: 'pointer' }}><Eye size={15} /></button>
+                            <button title="Delete" onClick={() => deleteLead(lead.id)} style={{ color: '#f87171', background: 'transparent', border: 0, cursor: 'pointer' }}><Trash2 size={15} /></button>
                           </div>
                         );
                       })}
@@ -1350,6 +1526,45 @@ function App() {
                     </div>
                   )}
                 </div>
+
+                {leadDetails && (
+                  <div className="glass-panel" style={{ marginTop: '1rem', padding: '1rem 1.1rem' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', marginBottom: '0.75rem' }}>
+                      <div>
+                        <strong>{leadDetails.username}</strong>
+                        <span style={{ marginLeft: '0.6rem', color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                          {leadDetails.platform} · score {leadDetails.quality_score || 0}
+                        </span>
+                      </div>
+                      <button onClick={() => setLeadDetails(null)} style={{ color: 'var(--text-muted)', background: 'transparent', border: 0, cursor: 'pointer' }}><X size={16} /></button>
+                    </div>
+                    {leadDetails.metadata && Object.keys(leadDetails.metadata).length > 0 && (
+                      <pre style={{ color: 'var(--text-muted)', whiteSpace: 'pre-wrap', fontSize: '0.75rem' }}>{JSON.stringify(leadDetails.metadata, null, 2)}</pre>
+                    )}
+                    <div style={{ display: 'grid', gap: '0.55rem', marginTop: '0.75rem' }}>
+                      {(leadDetails.marketing_messages || []).map(message => (
+                        <div key={message.id} style={{ padding: '0.75rem', background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '0.45rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
+                            <strong style={{ fontSize: '0.78rem' }}>{message.channel}</strong>
+                            <select value={message.status} onChange={e => updateDraftStatus(message.id, e.target.value)} className="input-field" style={{ padding: '0.2rem 0.35rem', fontSize: '0.7rem' }}>
+                              <option value="draft">Draft</option>
+                              <option value="approved">Approved</option>
+                              <option value="sent">Sent</option>
+                              <option value="archived">Archived</option>
+                            </select>
+                          </div>
+                          {message.subject && <div style={{ marginTop: '0.35rem', color: '#fff', fontSize: '0.78rem' }}>{message.subject}</div>}
+                          <div style={{ marginTop: '0.35rem', color: 'var(--text-muted)', whiteSpace: 'pre-wrap', fontSize: '0.76rem' }}>{message.body}</div>
+                        </div>
+                      ))}
+                      {(leadDetails.marketing_messages || []).length === 0 && (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                          {lang === 'zh' ? '暂无营销草稿，请在营销引擎运行 Pipeline。' : 'No outreach drafts yet. Run the Pipeline in Marketing Engine.'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
@@ -1574,23 +1789,39 @@ function App() {
                   <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#fff', marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                     <Activity size={17} color="var(--primary)" />
                     {lang === 'zh' ? '近期营销活动' : 'Recent Campaigns'}
+                    <button onClick={fetchMarketingCampaigns} disabled={campaignsLoading} style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: '0.35rem', padding: '0.25rem 0.6rem', borderRadius: '0.35rem', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: 'var(--text-muted)', cursor: campaignsLoading ? 'wait' : 'pointer', fontFamily: 'inherit', fontSize: '0.72rem' }}>
+                      <RefreshCw size={13} className={campaignsLoading ? 'loading-spinner' : ''} />
+                      {lang === 'zh' ? '刷新' : 'Refresh'}
+                    </button>
                   </h3>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                    {marketingCampaigns.map((c, i) => {
+                    {campaignsError && (
+                      <div style={{ color: '#f87171', fontSize: '0.82rem', padding: '0.8rem 1rem', background: 'rgba(239,68,68,0.06)', borderRadius: '0.5rem', border: '1px solid rgba(239,68,68,0.18)' }}>{campaignsError}</div>
+                    )}
+                    {!campaignsLoading && !campaignsError && marketingCampaigns.length === 0 && (
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.84rem', padding: '1.2rem', textAlign: 'center', background: 'rgba(0,0,0,0.16)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                        {lang === 'zh' ? '暂无营销活动。运行“全自动营销管道”后，活动会自动出现在这里。' : 'No campaigns yet. Run the Full Marketing Pipeline to create one.'}
+                      </div>
+                    )}
+                    {marketingCampaigns.map((c) => {
                       const s = marketingStatusStyle[c.status];
+                      const stats = lang === 'zh'
+                        ? `${c.lead_count} 条线索 · ${c.total_messages} 条消息 · 已审批 ${c.approved_messages} · 已发送 ${c.sent_messages}`
+                        : `${c.lead_count} leads · ${c.total_messages} messages · ${c.approved_messages} approved · ${c.sent_messages} sent`;
                       return (
-                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.85rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                        <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '1rem', padding: '0.85rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
                           <div style={{ flex: 1, minWidth: 0 }}>
-                            <div style={{ color: '#fff', fontWeight: 500, fontSize: '0.9rem' }}>{lang === 'zh' ? c.nameZh : c.nameEn}</div>
-                            <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '0.3rem' }}>{lang === 'zh' ? c.statsZh : c.statsEn}</div>
+                            <div style={{ color: '#fff', fontWeight: 500, fontSize: '0.9rem' }}>{c.name}</div>
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '0.3rem' }}>{stats}</div>
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginTop: '0.25rem', opacity: 0.7 }}>{new Date(c.created_at).toLocaleString()} · {c.generation_mode}</div>
                           </div>
                           {/* Progress bar */}
                           {c.status !== 'queued' && (
                             <div style={{ width: 80, flexShrink: 0 }}>
                               <div style={{ height: 4, background: 'rgba(255,255,255,0.06)', borderRadius: 99, overflow: 'hidden' }}>
-                                <div style={{ height: '100%', width: `${c.pct}%`, background: c.status === 'done' ? 'var(--success)' : '#60a5fa', borderRadius: 99, transition: 'width 0.5s' }} />
+                                <div style={{ height: '100%', width: `${c.progress}%`, background: c.status === 'done' ? 'var(--success)' : '#60a5fa', borderRadius: 99, transition: 'width 0.5s' }} />
                               </div>
-                              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem', textAlign: 'right' }}>{c.pct}%</div>
+                              <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '0.25rem', textAlign: 'right' }}>{c.progress}%</div>
                             </div>
                           )}
                           <span style={{ fontSize: '0.72rem', fontWeight: 600, padding: '0.2rem 0.6rem', borderRadius: '1rem', background: s.bg, color: s.color, border: `1px solid ${s.border}`, flexShrink: 0 }}>
@@ -1896,7 +2127,7 @@ function App() {
                           <span style={{ fontSize: '0.78rem', color: '#8b5cf6', fontWeight: 600 }}>{s.variant || s.type || `Script ${i+1}`}</span>
                           {s.tone && <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', padding: '0.1rem 0.4rem', borderRadius: '0.3rem', background: 'rgba(255,255,255,0.05)' }}>{s.tone}</span>}
                         </div>
-                        {s.opener && <div style={{ fontSize: '0.82rem', color: '#fbbf24', marginBottom: '0.2rem', fontStyle: 'italic' }}>"{s.opener}"</div>}
+                        {s.opener && <div style={{ fontSize: '0.82rem', color: '#fbbf24', marginBottom: '0.2rem', fontStyle: 'italic' }}>&quot;{s.opener}&quot;</div>}
                         <div className="ai-output-markdown" style={{ fontSize: '0.82rem', color: '#d1d5db', lineHeight: 1.5 }}><ReactMarkdown>{s.body || s.message || s.text || ''}</ReactMarkdown></div>
                         {s.cta && <div style={{ fontSize: '0.75rem', color: 'var(--accent)', marginTop: '0.25rem' }}>CTA: {s.cta}</div>}
                       </div>
@@ -2065,12 +2296,18 @@ function App() {
 
           {activeTab === 'settings' && (() => {
             const sysHealth = [
-              { labelZh: 'FastAPI 后端', labelEn: 'FastAPI Backend', status: 'online', uptimeZh: '运行 1h 24m', uptimeEn: 'Up 1h 24m' },
-              { labelZh: 'Playwright 引擎', labelEn: 'Playwright Engine', status: 'online', uptimeZh: '待机', uptimeEn: 'Standby' },
-              { labelZh: 'LLM 连接层', labelEn: 'LLM Gateway', status: 'online', uptimeZh: '响应 < 1s', uptimeEn: 'Latency < 1s' },
-              { labelZh: '代理线程池', labelEn: 'Agent Thread Pool', status: 'idle', uptimeZh: '3/8 线程', uptimeEn: '3/8 Threads' },
+              { labelZh: 'PostgreSQL 数据库', labelEn: 'PostgreSQL Database', ready: componentReady.database, detailZh: componentReady.database ? '已连接' : '未就绪', detailEn: componentReady.database ? 'Connected' : 'Not ready' },
+              { labelZh: 'Playwright 浏览器池', labelEn: 'Playwright Browser Pool', ready: componentReady.browser_pool, detailZh: `${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} 实例`, detailEn: `${systemStatus?.browser_pool?.total_browsers ?? '-'} / ${systemStatus?.browser_pool?.max_browsers ?? '-'} instances` },
+              { labelZh: '任务执行队列', labelEn: 'Task Execution Queue', ready: componentReady.task_queue, detailZh: `等待 ${systemStatus?.task_queue?.queue_size ?? '-'} · 执行中 ${systemStatus?.task_queue?.active_tasks ?? '-'}`, detailEn: `Pending ${systemStatus?.task_queue?.queue_size ?? '-'} · Active ${systemStatus?.task_queue?.active_tasks ?? '-'}` },
+              { labelZh: 'OpenRouter 生成层', labelEn: 'OpenRouter Generation', ready: systemStatus?.ai?.configured, detailZh: systemStatus?.ai?.configured ? '在线生成' : '本地回退', detailEn: systemStatus?.ai?.configured ? 'Online generation' : 'Local fallback' },
             ];
-            const llmOptions = ['GPT-4o (OpenAI)', 'Claude 3.5 Sonnet (Anthropic)', 'Gemini 2.5 Flash (Google)', 'GLM-4-Plus (Zhipu)'];
+            const envChecks = [
+              { key: 'DATABASE_URL', ready: systemStatus?.configuration?.database_url, required: true },
+              { key: 'JWT_SECRET_KEY', ready: systemStatus?.configuration?.jwt_secret, required: true },
+              { key: 'OPENROUTER_API_KEY', ready: systemStatus?.configuration?.openrouter_api_key, required: false },
+              { key: 'CHROME_USER_DATA_DIR', ready: systemStatus?.configuration?.chrome_user_data_dir, required: false },
+              { key: 'SCRAPER_PROXY', ready: systemStatus?.configuration?.scraper_proxy, required: false },
+            ];
             const sectionLabel = (icon, text) => (
               <h3 style={{ fontSize: '0.9rem', fontWeight: 700, color: '#fff', marginBottom: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.5rem', letterSpacing: '0.03em' }}>
                 {icon}{text}
@@ -2078,101 +2315,78 @@ function App() {
             );
             return (
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                {/* ── Row 1: Two-column (Config + System Health) ── */}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                  {/* Left: Config Sections */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {/* API Key Section */}
-                    <div className="glass-panel" style={{ padding: '1.5rem' }}>
-                      {sectionLabel(<Key size={16} color="var(--primary)" />, t.settingsApiKey)}
-                      <div style={{ position: 'relative', marginBottom: '0.75rem' }}>
-                        <input type={isChangingKey ? 'text' : 'password'} defaultValue={apiKey} onChange={e => setApiKey(e.target.value)} disabled={!isChangingKey} className="input-field"
-                          style={{ width: '100%', boxSizing: 'border-box', paddingRight: isChangingKey ? '1rem' : '6rem', opacity: isChangingKey ? 1 : 0.7 }} />
-                        {!isChangingKey && (
-                          <span style={{ position: 'absolute', right: '0.9rem', top: '50%', transform: 'translateY(-50%)', fontSize: '0.72rem', color: 'var(--text-muted)', background: 'rgba(255,255,255,0.05)', padding: '0.1rem 0.5rem', borderRadius: '0.3rem', border: '1px solid rgba(255,255,255,0.08)' }}>sk-···</span>
-                        )}
-                      </div>
-                      <button className="btn" onClick={() => setIsChangingKey(!isChangingKey)}
-                        style={{ background: isChangingKey ? 'rgba(16,185,129,0.15)' : 'rgba(99,102,241,0.15)', color: isChangingKey ? 'var(--success)' : 'var(--primary)', border: `1px solid ${isChangingKey ? 'rgba(16,185,129,0.3)' : 'rgba(99,102,241,0.3)'}`, gap: '0.5rem' }}>
-                        <Key size={14} />
-                        {isChangingKey ? (lang === 'zh' ? '保存密钥' : 'Save Key') : t.settingsUpdateKey}
-                      </button>
+                <div className="glass-panel" style={{ padding: '1.1rem 1.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                  <Activity size={18} color={systemStatus?.status === 'healthy' ? 'var(--success)' : '#f59e0b'} />
+                  <div style={{ flex: 1 }}>
+                    <div style={{ color: '#fff', fontWeight: 700, fontSize: '0.95rem' }}>
+                      {lang === 'zh' ? '单机工作台运行时配置' : 'Single-machine Workbench Runtime'}
                     </div>
-
-                    {/* Agent Settings */}
-                    <div className="glass-panel" style={{ padding: '1.5rem' }}>
-                      {sectionLabel(<Terminal size={16} color="var(--accent)" />, t.settingsAgent)}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.4rem', fontWeight: 500 }}>{t.settingsLlm}</label>
-                          <select className="input-field" style={{ width: '100%', boxSizing: 'border-box' }} value={selectedLlm} onChange={e => setSelectedLlm(e.target.value)}>
-                            {llmOptions.map(o => <option key={o} value={o}>{o}</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.4rem', fontWeight: 500 }}>{t.settingsConcurrent}</label>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                            <input type="range" min={1} max={16} value={concurrentLimit} onChange={e => setConcurrentLimit(e.target.value)} style={{ flex: 1, accentColor: 'var(--accent)', cursor: 'pointer' }} />
-                            <span style={{ color: '#fff', fontWeight: 700, fontSize: '1rem', minWidth: '2rem', textAlign: 'center' }}>{concurrentLimit}</span>
-                          </div>
-                        </div>
-                      </div>
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: '0.25rem' }}>
+                      {lang === 'zh' ? '本页只展示安全摘要。修改 .env 后执行 scripts/dev.ps1 -Restart 使配置生效。' : 'This page shows safe summaries only. Edit .env and run scripts/dev.ps1 -Restart to apply changes.'}
                     </div>
                   </div>
+                  <button className="btn" onClick={fetchSystemStatus} disabled={systemStatusLoading}
+                    style={{ background: 'rgba(99,102,241,0.15)', color: 'var(--primary)', border: '1px solid rgba(99,102,241,0.3)', gap: '0.45rem' }}>
+                    <RefreshCw size={14} className={systemStatusLoading ? 'loading-spinner' : ''} />
+                    {systemStatusLoading ? (lang === 'zh' ? '刷新中' : 'Refreshing') : (lang === 'zh' ? '刷新状态' : 'Refresh Status')}
+                  </button>
+                </div>
 
-                  {/* Right: System Health + Webhook */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    {/* System Health */}
                     <div className="glass-panel" style={{ padding: '1.5rem' }}>
-                      {sectionLabel(<Activity size={16} color="var(--success)" />, lang === 'zh' ? '系统健康状态' : 'System Health')}
+                      {sectionLabel(<Key size={16} color="var(--primary)" />, lang === 'zh' ? '.env 配置检查' : '.env Configuration Check')}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
-                        {sysHealth.map((s, i) => (
-                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', padding: '0.7rem 0.85rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
-                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: s.status === 'online' ? 'var(--success)' : '#f59e0b', boxShadow: `0 0 6px ${s.status === 'online' ? 'var(--success)' : '#f59e0b'}`, flexShrink: 0, animation: s.status === 'online' ? 'none' : undefined }} />
-                            <span style={{ flex: 1, color: '#fff', fontSize: '0.85rem', fontWeight: 500 }}>{lang === 'zh' ? s.labelZh : s.labelEn}</span>
-                            <span style={{ fontSize: '0.78rem', color: s.status === 'online' ? 'var(--success)' : '#f59e0b', fontFamily: 'monospace' }}>{lang === 'zh' ? s.uptimeZh : s.uptimeEn}</span>
+                        {envChecks.map(item => (
+                          <div key={item.key} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.65rem 0.8rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.45rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: item.ready ? 'var(--success)' : item.required ? '#ef4444' : '#f59e0b', boxShadow: `0 0 6px ${item.ready ? 'var(--success)' : item.required ? '#ef4444' : '#f59e0b'}` }} />
+                            <code style={{ flex: 1, color: '#fff', fontSize: '0.8rem' }}>{item.key}</code>
+                            <span style={{ fontSize: '0.72rem', color: item.ready ? 'var(--success)' : item.required ? '#f87171' : '#f59e0b' }}>
+                              {item.ready ? (lang === 'zh' ? '已配置' : 'Configured') : item.required ? (lang === 'zh' ? '必填' : 'Required') : (lang === 'zh' ? '可选' : 'Optional')}
+                            </span>
                           </div>
                         ))}
                       </div>
                     </div>
 
-                    {/* Webhook / Network */}
                     <div className="glass-panel" style={{ padding: '1.5rem' }}>
-                      {sectionLabel(<Globe size={16} color="#3b82f6" />, t.settingsNetwork)}
-                      <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.4rem', fontWeight: 500 }}>Webhook URL</label>
-                      <div style={{ display: 'flex', gap: '0.6rem' }}>
-                        <input type="text" value={webhookUrl} onChange={e => setWebhookUrl(e.target.value)} className="input-field" style={{ flex: 1, fontSize: '0.85rem' }} />
-                        <button className="btn" onClick={handleTestWebhook} disabled={isTestingWebhook}
-                          style={{ flexShrink: 0, background: webhookSuccess ? 'rgba(16,185,129,0.15)' : 'rgba(255,255,255,0.07)', color: webhookSuccess ? 'var(--success)' : '#fff', border: `1px solid ${webhookSuccess ? 'rgba(16,185,129,0.3)' : 'rgba(255,255,255,0.1)'}`, gap: '0.4rem' }}>
-                          {isTestingWebhook ? <><Loader2 size={14} className="loading-spinner" /> {t.settingsTesting}</> : webhookSuccess ? <><Activity size={14} /> {t.settingsSuccess}</> : t.settingsTestConn}
-                        </button>
+                      {sectionLabel(<Terminal size={16} color="var(--accent)" />, lang === 'zh' ? 'AI 路由配置' : 'AI Routing Configuration')}
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.7 }}>
+                        <div><span style={{ color: '#fff' }}>Provider:</span> {systemStatus?.ai?.provider || '-'}</div>
+                        <div><span style={{ color: '#fff' }}>{lang === 'zh' ? '生成模式' : 'Generation mode'}:</span> {systemStatus?.ai?.mode || '-'}</div>
+                        <div><span style={{ color: '#fff' }}>{lang === 'zh' ? '主模型' : 'Primary model'}:</span> <code>{systemStatus?.ai?.marketing_model || '-'}</code></div>
+                        <div><span style={{ color: '#fff' }}>{lang === 'zh' ? '回退链' : 'Fallback chain'}:</span> <code>{systemStatus?.ai?.fallback_models?.join(' → ') || '-'}</code></div>
                       </div>
-                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.6rem', lineHeight: 1.5 }}>
-                        {lang === 'zh' ? '成功抓取后将 Webhook 事件推送至此 URL，可接入 Zapier、n8n 等自动化工具。' : 'Trigger Webhook events after successful scrapes. Integrate with Zapier, n8n, or any HTTP endpoint.'}
-                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                      {sectionLabel(<Activity size={16} color="var(--success)" />, lang === 'zh' ? '系统健康状态' : 'System Health')}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                        {sysHealth.map((s, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.85rem', padding: '0.7rem 0.85rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: s.ready ? 'var(--success)' : '#f59e0b', boxShadow: `0 0 6px ${s.ready ? 'var(--success)' : '#f59e0b'}`, flexShrink: 0 }} />
+                            <span style={{ flex: 1, color: '#fff', fontSize: '0.85rem', fontWeight: 500 }}>{lang === 'zh' ? s.labelZh : s.labelEn}</span>
+                            <span style={{ fontSize: '0.78rem', color: s.ready ? 'var(--success)' : '#f59e0b', fontFamily: 'monospace' }}>{lang === 'zh' ? s.detailZh : s.detailEn}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="glass-panel" style={{ padding: '1.5rem' }}>
+                      {sectionLabel(<Globe size={16} color="#3b82f6" />, lang === 'zh' ? '运行参数' : 'Runtime Parameters')}
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.8 }}>
+                        <div><span style={{ color: '#fff' }}>{lang === 'zh' ? '环境' : 'Environment'}:</span> {systemStatus?.environment || '-'}</div>
+                        <div><span style={{ color: '#fff' }}>{lang === 'zh' ? '队列并发上限' : 'Queue concurrency'}:</span> {systemStatus?.task_queue?.max_concurrent ?? '-'}</div>
+                        <div><span style={{ color: '#fff' }}>Redis:</span> {systemStatus?.task_queue?.use_redis ? (lang === 'zh' ? '已启用' : 'Enabled') : (lang === 'zh' ? '未启用（单机内存队列）' : 'Disabled (in-memory queue)')}</div>
+                        <div><span style={{ color: '#fff' }}>Demo mode:</span> {systemStatus?.configuration?.demo_mode ? 'true' : 'false'}</div>
+                      </div>
                     </div>
                   </div>
                 </div>
 
-                {/* ── Row 2: Danger Zone ── */}
-                <div className="glass-panel" style={{ padding: '1.25rem 1.5rem', border: '1px solid rgba(239,68,68,0.2)', background: 'rgba(239,68,68,0.03)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ color: '#f87171', fontWeight: 700, fontSize: '0.9rem', marginBottom: '0.25rem' }}>{lang === 'zh' ? '⚠ 危险区域' : '⚠ Danger Zone'}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{lang === 'zh' ? '以下操作不可撤销，请谨慎操作' : 'The following actions are irreversible. Proceed with caution.'}</div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '0.6rem' }}>
-                      <button style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: '0.4rem', cursor: 'pointer', fontFamily: 'inherit', background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.25)' }}
-                        onClick={() => confirm(lang === 'zh' ? '确认清空所有线索数据？' : 'Clear all lead data?')}>
-                        {lang === 'zh' ? '清除线索数据' : 'Clear Lead Data'}
-                      </button>
-                      <button style={{ padding: '0.4rem 1rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: '0.4rem', cursor: 'pointer', fontFamily: 'inherit', background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.25)' }}
-                        onClick={() => confirm(lang === 'zh' ? '确认重置所有设置？' : 'Reset all settings to defaults?')}>
-                        {lang === 'zh' ? '恢复出厂设置' : 'Reset to Defaults'}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                {systemStatusError && <div style={{ color: '#f87171', fontSize: '0.82rem' }}>{systemStatusError}</div>}
               </div>
             );
           })()}

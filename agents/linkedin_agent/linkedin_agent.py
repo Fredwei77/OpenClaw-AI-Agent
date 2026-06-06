@@ -97,7 +97,7 @@ class LinkedInAgent(BaseAgent):
 
             if response.status == 999:
                 print("[LinkedInAgent] Rate limited or blocked by LinkedIn")
-                return await self._get_mock_leads(keyword, limit)
+                return await self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
             # 等待页面加载
             await asyncio.sleep(3)
@@ -105,7 +105,7 @@ class LinkedInAgent(BaseAgent):
             # 检查是否需要登录
             if await self._is_login_page(page):
                 print("[LinkedInAgent] Detected login page, using mock data")
-                return await self._get_mock_leads(keyword, limit)
+                return await self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
             # 提取用户卡片
             leads = await self._extract_leads(page, keyword, limit)
@@ -114,12 +114,13 @@ class LinkedInAgent(BaseAgent):
 
         except Exception as e:
             print(f"[LinkedInAgent] Error during scraping: {e}")
-            leads = await self._get_mock_leads(keyword, limit)
+            leads = await self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
         # 保存到数据库
         if leads and self.db:
             try:
-                await self.db.save_leads(leads)
+                from backend.db import save_leads
+                await save_leads(leads, task.get("user_id"))
             except Exception as e:
                 print(f"[LinkedInAgent] Failed to save leads: {e}")
 

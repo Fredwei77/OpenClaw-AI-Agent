@@ -105,7 +105,7 @@ class TikTokAgent(BaseAgent):
             await page.close()
 
         # 如果真实数据截获失败，提供后备的 Mock 数据
-        if not leads:
+        if not leads and os.getenv("DEMO_MODE", "false").lower() == "true":
             print(f"[TikTokAgent] 真实数据截获失败，已启用 Mock 机制填补 '{keyword}' 在 TikTok 的演示线索。")
             leads = [
                 {
@@ -137,7 +137,7 @@ class TikTokAgent(BaseAgent):
         # 根据爬取结果判定是否调用 backend.db 存储
         if leads:
             print(f"[TikTokAgent] 成功提取了 {len(leads)} 个潜在客户。正在同步至 PostgreSQL...")
-            await save_leads(leads)
+            await save_leads(leads, task.get("user_id"))
         else:
             print("[TikTokAgent] 本次抓取未获得任何线索数据。")
 

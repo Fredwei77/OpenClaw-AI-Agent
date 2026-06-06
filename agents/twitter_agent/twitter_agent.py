@@ -94,12 +94,13 @@ class TwitterAgent(BaseAgent):
 
         except Exception as e:
             print(f"[TwitterAgent] Error during scraping: {e}")
-            leads = self._get_mock_leads(keyword, limit)
+            leads = self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
         # 保存到数据库
         if leads and self.db:
             try:
-                await self.db.save_leads(leads)
+                from backend.db import save_leads
+                await save_leads(leads, task.get("user_id"))
             except Exception as e:
                 print(f"[TwitterAgent] Failed to save leads: {e}")
 

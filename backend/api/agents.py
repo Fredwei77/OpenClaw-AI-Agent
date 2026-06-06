@@ -1,20 +1,67 @@
 from fastapi import APIRouter, HTTPException, Depends
 import os
+import sys
 import asyncio
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from openai import AsyncOpenAI
 import traceback
+import re
+from datetime import datetime
 
 from browser_cluster.manager.browser_pool import get_browser_pool
 from scheduler.task_queue import get_task_queue, TaskPriority
 from .auth import get_current_user
 
 router = APIRouter()
+MAX_REASONABLE_FOLLOWERS = 10_000_000_000
+
+
+def _parse_social_count(text: str) -> int:
+    """Parse follower counters without treating arbitrary text as a compact number."""
+    if not text:
+        return 0
+    match = re.search(
+        r"(?i)(\d[\d,]*(?:\.\d+)?)\s*([KMB])?\s*followers?\b",
+        text,
+    )
+    if not match:
+        match = re.fullmatch(r"\s*(\d[\d,]*(?:\.\d+)?)\s*([KMB])\s*", text, re.IGNORECASE)
+    if not match:
+        return 0
+    number = float(match.group(1).replace(",", ""))
+    multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[(match.group(2) or "").upper()]
+    return min(int(number * multiplier), MAX_REASONABLE_FOLLOWERS)
+
+
+def _auto_detect_chrome_user_data_dir() -> str | None:
+    """Auto-detect Chrome user data directory when CHROME_USER_DATA_DIR is not set."""
+    candidates = []
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        if local_app_data:
+            candidates.append(os.path.join(local_app_data, "Google", "Chrome", "User Data"))
+            candidates.append(os.path.join(local_app_data, "Microsoft", "Edge", "User Data"))
+    elif sys.platform == "darwin":
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, "Library", "Application Support", "Google", "Chrome"))
+    else:
+        home = os.path.expanduser("~")
+        candidates.append(os.path.join(home, ".config", "google-chrome"))
+
+    for d in candidates:
+        if os.path.isdir(d) and os.path.isdir(os.path.join(d, "Default")):
+            return d
+    return None
 
 # OpenRouter configuration
 API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 BASE_URL = "https://openrouter.ai/api/v1"
+MARKETING_MODEL = os.getenv("OPENROUTER_MARKETING_MODEL", "qwen/qwen3-30b-a3b-instruct-2507")
+MARKETING_FALLBACK_MODELS = os.getenv(
+    "OPENROUTER_MARKETING_FALLBACK_MODELS",
+    "google/gemini-2.5-flash,google/gemini-2.5-flash-lite,openai/gpt-4o-mini",
+)
 
 # Module-level reusable client (created lazily on first use)
 _llm_client: Optional[AsyncOpenAI] = None
@@ -30,19 +77,42 @@ def _get_llm_client() -> AsyncOpenAI:
     return _llm_client
 
 
+def _marketing_model_candidates() -> list[str]:
+    models = [MARKETING_MODEL, *(model.strip() for model in MARKETING_FALLBACK_MODELS.split(","))]
+    return list(dict.fromkeys(model for model in models if model))
+
+
+async def _create_marketing_completion(client: AsyncOpenAI, *, messages: list[dict], max_tokens: int, temperature: float = 0.35):
+    """Try configured OpenRouter marketing models in order before using local fallback."""
+    last_error = None
+    for model in _marketing_model_candidates():
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response, model
+        except Exception as exc:
+            last_error = exc
+            print(f"[MarketingModel] {model} failed: {exc}")
+    raise RuntimeError(f"All configured marketing models failed: {last_error}")
+
+
 # ========================
 # Pydantic Models
 # ========================
 
 class ChatRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(..., min_length=1, max_length=12000)
     language: str = "en"
 
 
 class ScrapeRequest(BaseModel):
     keyword: str = "fitness equipment"
     platform: str = "x"
-    user_id: Optional[int] = None
     # 高级选项
     use_proxy: bool = False  # 是否使用代理
     store_domain: Optional[str] = None  # Shopify 店铺域名（如 mystore.myshopify.com）
@@ -67,9 +137,135 @@ class TaskStatusRequest(BaseModel):
 
 
 class MarketingPipelineRequest(BaseModel):
-    leads: list
+    lead_ids: list[int] = Field(..., min_length=1, max_length=20)
     product_context: str = ""
     language: str = "en"
+
+
+class MarketingActionRequest(BaseModel):
+    action: Literal["email", "classify", "social"]
+    lead_ids: list[int] = Field(..., min_length=1, max_length=10)
+    product_context: str = Field(default="", max_length=2000)
+    language: Literal["zh", "en"] = "en"
+
+
+def _is_usable_marketing_text(text: str, language: str = "en") -> bool:
+    """Reject empty, corrupted, or obviously incoherent marketing output."""
+    if not text or not 40 <= len(text.strip()) <= 8000:
+        return False
+    if any(marker in text for marker in ("\ufffd", "锛", "銆", "鈥", "馃")):
+        return False
+    if re.search(r"[A-Za-z]{36,}", text):
+        return False
+    foreign_script_chars = re.findall(r"[\u0400-\u052f\u0590-\u05ff\u0600-\u06ff]", text)
+    if len(foreign_script_chars) > 3:
+        return False
+    return True
+
+
+def _lead_summary(lead: dict) -> str:
+    tags = ", ".join(str(tag) for tag in (lead.get("tags") or [])[:4]) or "none"
+    return (
+        f"- Lead #{lead.get('id')}: {lead.get('username', 'unknown')} | "
+        f"platform={lead.get('platform', 'unknown')} | followers={lead.get('followers', 0)} | "
+        f"email={lead.get('email') or 'none'} | tags={tags}"
+    )
+
+
+def _fallback_marketing_action(action: str, leads: list[dict], product_context: str, language: str) -> str:
+    lead = leads[0]
+    username = lead.get("username") or "您好"
+    niche = product_context.strip() or ((lead.get("tags") or ["跨境电商"])[0])
+    if language == "zh":
+        if action == "email":
+            return f"""## 个性化开发信
+
+**建议主题：** 关于 {niche} 的合作机会
+
+您好，{username}：
+
+关注到您在 {lead.get("platform", "社交平台")} 上持续分享与 **{niche}** 相关的内容。我们正在为该领域的品牌和渠道伙伴提供更高效的获客与转化支持，希望了解您当前在客户增长或市场拓展方面的重点。
+
+如果您方便，我可以根据您的业务场景整理一份简短建议。是否可以安排一次 15 分钟沟通？
+
+祝好"""
+        if action == "classify":
+            lines = ["## 潜在客户评分", ""]
+            for item in leads:
+                followers = item.get("followers", 0)
+                score = min(95, 45 + (20 if followers >= 10_000 else 10 if followers >= 1_000 else 0) + (10 if item.get("email") else 0))
+                tier = "高意向" if score >= 75 else "中意向" if score >= 55 else "待培育"
+                evidence = "已有公开邮箱，可优先邮件触达" if item.get("email") else f"可从 {item.get('platform', '社交平台')} 私信开始建立联系"
+                lines.append(f"- **{item.get('username', '未知客户')}**：{score}/100，{tier}。判断依据：{evidence}。下一步：围绕 {niche} 的业务价值发送一条简短、个性化的首次消息。")
+            return "\n".join(lines)
+        return f"""## 社交媒体跟进建议
+
+**LinkedIn 私信**
+您好，{username}。关注到您在 {niche} 领域的内容，很有启发。我们正在帮助相关团队提升获客效率，希望有机会交流您目前最关注的增长问题。
+
+**X / Twitter 私信**
+Hi {username}，看到您分享的 {niche} 内容，很有启发。我们在帮助相关品牌优化获客与转化，方便交流一下您当前最关注的增长方向吗？
+
+**跟进建议**
+首次触达保持简短；若 3 天内未回复，可补充一条与其公开内容相关的具体观察。"""
+    if action == "email":
+        return f"""## Personalized Cold Email
+
+**Subject:** Exploring a {niche} growth opportunity
+
+Hi {username},
+
+I noticed your work around **{niche}** on {lead.get("platform", "social media")}. We help teams in this space improve lead generation and conversion, and I would be interested in learning which growth priorities matter most to you right now.
+
+Would you be open to a brief 15-minute conversation next week?
+
+Best regards"""
+    if action == "classify":
+        lines = ["## Lead Scoring", ""]
+        for item in leads:
+            followers = item.get("followers", 0)
+            score = min(95, 45 + (20 if followers >= 10_000 else 10 if followers >= 1_000 else 0) + (10 if item.get("email") else 0))
+            tier = "High intent" if score >= 75 else "Medium intent" if score >= 55 else "Nurture"
+            evidence = "public email is available" if item.get("email") else f"start with a {item.get('platform', 'social')} DM"
+            lines.append(f"- **{item.get('username', 'Unknown lead')}**: {score}/100, {tier}. Evidence: {evidence}. Next step: send a concise, personalized message focused on the business value of {niche}.")
+        return "\n".join(lines)
+    return f"""## Social Follow-up Suggestions
+
+**LinkedIn DM**
+Hi {username}, I enjoyed your perspective on {niche}. We help teams in this space improve lead generation and conversion. Would you be open to comparing notes on your current growth priorities?
+
+**X / Twitter DM**
+Hi {username}, enjoyed your posts on {niche}. We work with teams improving acquisition and conversion. Open to a quick exchange on what you are prioritizing this quarter?
+
+**Follow-up**
+Keep the first message brief. If there is no reply after three days, follow up with one specific observation from their public profile."""
+
+
+def _marketing_action_prompt(action: str, leads: list[dict], product_context: str, language: str) -> tuple[str, str]:
+    action_guidance = {
+        "email": "Write one personalized cold email with a subject line, concise body, and one low-friction CTA.",
+        "classify": "Score each lead from 0-100, assign High/Medium/Nurture intent, explain the evidence, and recommend the next action.",
+        "social": "Write one LinkedIn DM, one X/Twitter DM under 240 characters, and one practical follow-up suggestion.",
+    }[action]
+    language_rule = "Write in Simplified Chinese." if language == "zh" else "Write in English."
+    system = (
+        "You are a senior B2B growth marketer for cross-border e-commerce. "
+        "Produce concise, specific, ready-to-use copy. Never invent names, companies, referrals, events, or private facts. "
+        "Use only the supplied lead data. Avoid hype, placeholders, and generic filler. "
+        f"{language_rule} Return clean Markdown only."
+    )
+    user = f"""Task: {action_guidance}
+
+Product or niche context: {product_context or "not provided"}
+
+Owned lead data:
+{chr(10).join(_lead_summary(lead) for lead in leads)}
+
+Quality requirements:
+- Mention only facts present in the lead data.
+- Keep the output scannable with headings and bullets where appropriate.
+- Do not include analysis notes or unsupported claims."""
+    return system, user
 
 
 # ========================
@@ -77,7 +273,7 @@ class MarketingPipelineRequest(BaseModel):
 # ========================
 
 @router.post("/test-llm")
-async def test_llm(request: ChatRequest):
+async def test_llm(request: ChatRequest, current_user=Depends(get_current_user)):
     """Test LLM connectivity via OpenRouter"""
     # 检查 API Key 是否配置
     if not API_KEY or API_KEY == "sk-or-v1-your-key-here":
@@ -126,12 +322,62 @@ async def test_llm(request: ChatRequest):
             return {"status": "error", "message": f"OpenRouter API call failed: {error_str}"}
 
 
+@router.post("/marketing-action")
+async def marketing_action(
+    request: MarketingActionRequest,
+    current_user=Depends(get_current_user),
+):
+    """Generate validated, ready-to-use output for one marketing action."""
+    from db import get_db_pool as _get_pool
+
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, platform, username, profile_url, email, followers, tags
+               FROM leads
+               WHERE user_id = $1 AND id = ANY($2::int[])
+               ORDER BY created_at DESC""",
+            current_user.id, request.lead_ids,
+        )
+    leads = [dict(row) for row in rows]
+    if not leads:
+        raise HTTPException(status_code=404, detail="No owned leads found")
+
+    fallback = _fallback_marketing_action(
+        request.action, leads, request.product_context, request.language
+    )
+    if not API_KEY or API_KEY == "sk-or-v1-your-key-here":
+        return {"status": "success", "content": fallback, "generation_mode": "local_fallback"}
+
+    try:
+        system_prompt, user_prompt = _marketing_action_prompt(
+            request.action, leads, request.product_context, request.language
+        )
+        client = _get_llm_client()
+        response, model_used = await _create_marketing_completion(
+            client,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.35,
+            max_tokens=1400,
+        )
+        content = (response.choices[0].message.content or "").strip()
+        if not _is_usable_marketing_text(content, request.language):
+            return {"status": "success", "content": fallback, "generation_mode": "quality_fallback"}
+        return {"status": "success", "content": content, "generation_mode": "openrouter", "model": model_used}
+    except Exception as exc:
+        print(f"[MarketingAction] Falling back to local output: {exc}")
+        return {"status": "success", "content": fallback, "generation_mode": "error_fallback"}
+
+
 # ========================
 # Agent List
 # ========================
 
 @router.get("/")
-async def get_agents():
+async def get_agents(current_user=Depends(get_current_user)):
     """List all available agents"""
     return {
         "agents": [
@@ -156,7 +402,7 @@ async def get_agents():
 # ========================
 
 @router.get("/pool-status")
-async def get_pool_status():
+async def get_pool_status(current_user=Depends(get_current_user)):
     """Get browser pool status"""
     try:
         pool = get_browser_pool()
@@ -171,7 +417,7 @@ async def get_pool_status():
 # ========================
 
 @router.get("/queue-status")
-async def get_queue_status():
+async def get_queue_status(current_user=Depends(get_current_user)):
     """Get task queue status"""
     try:
         queue = get_task_queue()
@@ -488,19 +734,9 @@ async def _scrape_twitter(page, keyword: str) -> list:
                     # 提取粉丝数（如果能找到）
                     followers = 0
                     for text in text_contents:
-                        # 匹配 "1.2M followers" 或 "12.5K" 格式
-                        if 'followers' in text.lower() or 'M' in text or 'K' in text:
-                            followers_text = text
-                            # 提取数字
-                            numbers = re.findall(r'[\d.]+', followers_text)
-                            if numbers:
-                                num = float(numbers[0])
-                                if 'M' in followers_text:
-                                    followers = int(num * 1000000)
-                                elif 'K' in followers_text:
-                                    followers = int(num * 1000)
-                                else:
-                                    followers = int(num)
+                        parsed_followers = _parse_social_count(text)
+                        if parsed_followers:
+                            followers = parsed_followers
                             break
 
                     leads.append({
@@ -970,7 +1206,7 @@ async def _scrape_public_directory(page, keyword: str) -> list:
 
 
 @router.post("/test-scraper")
-async def test_scraper(request: ScrapeRequest):
+async def test_scraper(request: ScrapeRequest, current_user=Depends(get_current_user)):
     """
     Trigger LeadAgent for real scraping using the persistent browser pool.
     Supports multiple platforms: x, twitter, linkedin, instagram, shopify
@@ -995,8 +1231,8 @@ async def test_scraper(request: ScrapeRequest):
         if proxy_url:
             proxy_config = {"host": proxy_url}
 
-        # 读取 Chrome 用户数据目录（用于保持登录态）
-        user_data_dir = os.getenv("CHROME_USER_DATA_DIR")
+        # 读取 Chrome 用户数据目录（用于保持登录态），未设置时自动检测
+        user_data_dir = os.getenv("CHROME_USER_DATA_DIR") or _auto_detect_chrome_user_data_dir()
 
         # 读取 CDP URL（优先使用，保持登录态更稳定）
         cdp_url = os.getenv("CDP_URL")
@@ -1080,7 +1316,7 @@ async def test_scraper(request: ScrapeRequest):
             # 保存真实数据到数据库（跳过空结果，不写入伪造数据）
             if leads:
                 from db import save_leads
-                await save_leads(leads, request.user_id)
+                await save_leads(leads, current_user.id)
 
             return {
                 "status": "success",
@@ -1121,7 +1357,7 @@ class SerpSearchRequest(BaseModel):
 
 
 @router.post("/serp-search")
-async def serpapi_search(request: SerpSearchRequest):
+async def serpapi_search(request: SerpSearchRequest, current_user=Depends(get_current_user)):
     """
     使用 SerpAPI 进行合规的搜索引擎结果爬取
 
@@ -1225,7 +1461,7 @@ async def serpapi_search(request: SerpSearchRequest):
         # Save to database
         if leads:
             from db import save_leads
-            await save_leads(leads)
+            await save_leads(leads, current_user.id)
 
         return {
             "status": "success",
@@ -1350,7 +1586,7 @@ RESEARCH_SYSTEM_PROMPT = """You are a B2B lead research analyst for cross-border
 - "quality_score": integer 0-100 estimating lead quality (consider followers, profile completeness, relevance)
 - "tier": "A" if quality_score >= 75, "B" if >= 50, "C" otherwise
 
-IMPORTANT: All text values in the JSON must be written in English. Do not use Chinese or any other language.
+Use the language explicitly requested by the user for descriptive text fields.
 Respond with ONLY valid JSON, no markdown, no explanation."""
 
 CHAT_SYSTEM_PROMPT = """You are a B2B marketing copywriter for cross-border e-commerce. Given a lead's research profile, generate personalized outreach messages for 3 channels. Return a JSON object with a "messages" array containing exactly 3 objects, each with:
@@ -1365,7 +1601,7 @@ Guidelines:
 - For tier A leads, be more detailed and personalized
 - For tier C leads, keep it brief and value-focused
 - Include a clear call-to-action in each message
-- IMPORTANT: All text (subject, body, cta) must be written in English unless explicitly told otherwise
+- Use the language explicitly requested by the user for subject, body, and cta
 
 Respond with ONLY valid JSON, no markdown."""
 
@@ -1381,7 +1617,7 @@ def _strip_json_fences(text: str) -> str:
 def _lead_fallback_research(lead: dict) -> dict:
     """Fallback research when LLM fails."""
     followers = lead.get("followers", 0)
-    score = min(50, max(10, followers // 200))
+    score = min(95, max(20, 35 + followers // 500))
     tier = "A" if score >= 75 else ("B" if score >= 50 else "C")
     return {
         "industry": lead.get("tags", ["Unknown"])[0] if lead.get("tags") else "Unknown",
@@ -1393,8 +1629,40 @@ def _lead_fallback_research(lead: dict) -> dict:
     }
 
 
+def _clean_research_result(result: dict, lead: dict) -> dict:
+    """Normalize LLM research fields before they reach message generation or storage."""
+    fallback = _lead_fallback_research(lead)
+    if not isinstance(result, dict):
+        return fallback
+    try:
+        score = min(100, max(0, int(result.get("quality_score", fallback["quality_score"]))))
+    except (TypeError, ValueError):
+        score = fallback["quality_score"]
+
+    def clean_list(key: str, maximum: int) -> list[str]:
+        values = result.get(key)
+        if not isinstance(values, list):
+            return fallback[key]
+        cleaned = [str(value).strip() for value in values if str(value).strip()][:maximum]
+        return cleaned or fallback[key]
+
+    industry = str(result.get("industry") or fallback["industry"]).strip()[:80]
+    if not industry or any(marker in industry for marker in ("\ufffd", "锛", "銆", "鈥")):
+        industry = fallback["industry"]
+    return {
+        "industry": industry,
+        "interests": clean_list("interests", 4),
+        "best_channel": result.get("best_channel") if result.get("best_channel") in {"email", "social_dm"} else fallback["best_channel"],
+        "talking_points": clean_list("talking_points", 3),
+        "quality_score": score,
+        "tier": "A" if score >= 75 else ("B" if score >= 50 else "C"),
+    }
+
+
 async def _research_lead(client, lead: dict, product_context: str, language: str) -> dict:
     """Research Agent: analyze a single lead via LLM."""
+    if client is None:
+        return _lead_fallback_research(lead)
     async with _pipeline_semaphore:
         try:
             user_prompt = f"""Lead profile:
@@ -1412,22 +1680,18 @@ async def _research_lead(client, lead: dict, product_context: str, language: str
             else:
                 user_prompt += "\n\nIMPORTANT: Write ALL fields (industry, interests, talking_points) in English only."
 
-            response = await client.chat.completions.create(
-                model="meta-llama/llama-3-8b-instruct",
+            response, _ = await _create_marketing_completion(
+                client,
                 messages=[
                     {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
-                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                temperature=0.25,
                 max_tokens=500
             )
             raw = response.choices[0].message.content
             result = json.loads(_strip_json_fences(raw))
-            # Ensure required fields
-            for key in ["industry", "interests", "best_channel", "talking_points", "quality_score", "tier"]:
-                if key not in result:
-                    result[key] = _lead_fallback_research(lead)[key]
-            return result
+            return _clean_research_result(result, lead)
         except Exception as e:
             print(f"[ResearchAgent] Failed for {lead.get('username')}: {e}")
             return _lead_fallback_research(lead)
@@ -1435,6 +1699,8 @@ async def _research_lead(client, lead: dict, product_context: str, language: str
 
 async def _generate_messages(client, lead: dict, research: dict, product_context: str, language: str) -> list:
     """Chat Agent: generate personalized outreach messages."""
+    if client is None:
+        return _fallback_messages(lead, research, language)
     async with _pipeline_semaphore:
         try:
             user_prompt = f"""Lead research:
@@ -1455,20 +1721,23 @@ async def _generate_messages(client, lead: dict, research: dict, product_context
             else:
                 user_prompt += "\n\nIMPORTANT: Write ALL messages (subject, body, cta) in English only. Do not use Chinese."
 
-            response = await client.chat.completions.create(
-                model="meta-llama/llama-3-8b-instruct",
+            response, _ = await _create_marketing_completion(
+                client,
                 messages=[
                     {"role": "system", "content": CHAT_SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt}
                 ],
-                extra_headers={"HTTP-Referer": "http://localhost:8000", "X-Title": "OpenClaw AI Agent"},
+                temperature=0.35,
                 max_tokens=1500
             )
             raw = response.choices[0].message.content
             result = json.loads(_strip_json_fences(raw))
             messages = result.get("messages", [])
-            # Validate twitter_dm length
+            if not isinstance(messages, list) or {msg.get("channel") for msg in messages} != {"email", "linkedin_dm", "twitter_dm"}:
+                return _fallback_messages(lead, research, language)
             for msg in messages:
+                if not _is_usable_marketing_text(msg.get("body", ""), language):
+                    return _fallback_messages(lead, research, language)
                 if msg.get("channel") == "twitter_dm" and len(msg.get("body", "")) > 280:
                     msg["body"] = msg["body"][:277] + "..."
             return messages if messages else _fallback_messages(lead, research, language)
@@ -1481,19 +1750,17 @@ def _fallback_messages(lead: dict, research: dict, language: str) -> list:
     """Fallback messages when LLM fails."""
     username = lead.get("username", "")
     industry = research.get("industry", "your industry")
-    tier = research.get("tier", "C")
-
     if language == "zh":
         return [
-            {"channel": "email", "subject": f"关于{industry}的合作机会", "body": f"您好 {username}，我们注意到您在{industry}领域的活跃表现，希望能探讨合作机会。", "cta": "预约15分钟通话"},
-            {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}，看了您的资料很感兴趣，方便聊聊合作吗？", "cta": ""},
-            {"channel": "twitter_dm", "subject": "", "body": f"Hi {username}! 对您的业务很感兴趣，期待交流 🤝", "cta": ""}
+            {"channel": "email", "subject": f"关于 {industry} 的合作机会", "body": f"您好，{username}：\n\n关注到您在 {industry} 领域的持续投入。我们正在帮助相关团队提升获客与转化效率，希望了解您当前最关注的增长方向。\n\n如果您方便，是否可以安排一次 15 分钟沟通？", "cta": "预约 15 分钟交流"},
+            {"channel": "linkedin_dm", "subject": "", "body": f"您好，{username}。关注到您在 {industry} 领域的内容，很有启发。我们正在帮助相关团队提升获客效率，方便交流一下您当前的增长重点吗？", "cta": "交流增长重点"},
+            {"channel": "twitter_dm", "subject": "", "body": f"您好，{username}。看到您分享的 {industry} 内容，很有启发。我们在帮助相关团队优化获客与转化，方便简单交流一下吗？", "cta": "简单交流"}
         ]
     else:
         return [
             {"channel": "email", "subject": f"Collaboration opportunity in {industry}", "body": f"Hi {username},\n\nWe noticed your active presence in {industry} and would love to explore a potential collaboration.", "cta": "Book a 15-min call"},
             {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}, I came across your profile and found your work in {industry} impressive. Would you be open to a quick chat?", "cta": ""},
-            {"channel": "twitter_dm", "subject": "", "body": f"Hey {username}! Love what you're doing in {industry}. Let's connect! 🤝", "cta": ""}
+            {"channel": "twitter_dm", "subject": "", "body": f"Hi {username}, I enjoyed your posts on {industry}. We help teams improve acquisition and conversion. Open to a quick exchange?", "cta": "Compare notes"}
         ]
 
 
@@ -1508,12 +1775,24 @@ async def marketing_pipeline(
     """
     try:
         client = _get_llm_client()
+        generation_mode = "openrouter"
     except RuntimeError:
-        raise HTTPException(status_code=500, detail="OPENROUTER_API_KEY not configured")
+        client = None
+        generation_mode = "local_fallback"
 
-    leads = request.leads[:20]  # Cap at 20 leads
+    from db import get_db_pool as _get_pool
+    pool = await _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, platform, username, profile_url, email, followers, tags
+               FROM leads
+               WHERE user_id = $1 AND id = ANY($2::int[])
+               ORDER BY created_at DESC""",
+            current_user.id, request.lead_ids,
+        )
+    leads = [dict(row) for row in rows]
     if not leads:
-        return {"status": "error", "message": "No leads provided"}
+        raise HTTPException(status_code=404, detail="No owned leads found")
 
     product_context = request.product_context
     language = request.language
@@ -1534,24 +1813,35 @@ async def marketing_pipeline(
     tier_distribution = {"A": 0, "B": 0, "C": 0}
     results = []
     db_messages = []
+    from db import create_marketing_campaign
+    campaign_name = f"{product_context.strip()} Outreach" if product_context.strip() else f"Pipeline Outreach · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    campaign_id = await create_marketing_campaign(
+        user_id=user_id,
+        name=campaign_name[:255],
+        product_context=product_context,
+        lead_count=len(leads),
+        generation_mode=generation_mode,
+    )
 
     for i, lead in enumerate(leads):
         research = research_results[i]
         messages = all_messages[i]
 
-        tier_distribution[research.get("tier", "C")] += 1
+        tier = research.get("tier", "C")
+        tier_distribution[tier if tier in tier_distribution else "C"] += 1
 
         # Save research to leads table
         lead_id = lead.get("id")
         if lead_id:
             from db import save_lead_research, save_marketing_messages
-            await save_lead_research(lead_id, research, research.get("quality_score", 0))
+            await save_lead_research(lead_id, user_id, research, research.get("quality_score", 0))
 
         # Prepare messages for DB
         for msg in messages:
             db_messages.append({
                 "lead_id": lead_id,
                 "user_id": user_id,
+                "campaign_id": campaign_id,
                 "channel": msg.get("channel", ""),
                 "subject": msg.get("subject", ""),
                 "body": msg.get("body", ""),
@@ -1580,10 +1870,12 @@ async def marketing_pipeline(
     return {
         "status": "success",
         "summary": {
+            "campaign_id": campaign_id,
             "total_leads": len(leads),
             "researched": len(research_results),
             "messages_generated": sum(len(m) for m in all_messages),
-            "tier_distribution": tier_distribution
+            "tier_distribution": tier_distribution,
+            "generation_mode": generation_mode,
         },
         "results": results
     }

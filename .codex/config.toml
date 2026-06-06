@@ -1,0 +1,44 @@
+[mcp_servers.context7]
+args = [
+    "-y",
+    "@context7/mcp-server",
+]
+command = "npx"
+
+[mcp_servers.github]
+args = [
+    "-y",
+    "@modelcontextprotocol/server-github",
+]
+command = "npx"
+
+[mcp_servers.github.env]
+GITHUB_TOKEN = '{"env":"GITHUB_TOKEN"}'
+
+[mcp_servers.playwright]
+args = [
+    "-y",
+    "@modelcontextprotocol/server-playwright",
+]
+command = "npx"
+
+[mcp_servers.postgres]
+args = [
+    "-y",
+    "@modelcontextprotocol/server-postgres",
+]
+command = "npx"
+
+[mcp_servers.postgres.env]
+DATABASE_URL = '{"env":"DATABASE_URL"}'
+
+[mcp_servers.slack]
+args = [
+    "-y",
+    "@modelcontextprotocol/server-slack",
+]
+command = "npx"
+
+[mcp_servers.slack.env]
+SLACK_BOT_TOKEN = '{"env":"SLACK_BOT_TOKEN"}'
+SLACK_TEAM_ID = '{"env":"SLACK_TEAM_ID"}'

@@ -95,12 +95,13 @@ class FacebookAgent(BaseAgent):
 
         except Exception as e:
             print(f"[FacebookAgent] Error during scraping: {e}")
-            leads = await self._get_mock_leads(keyword, limit)
+            leads = await self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
         # 保存到数据库
         if leads and self.db:
             try:
-                await self.db.save_leads(leads)
+                from backend.db import save_leads
+                await save_leads(leads, task.get("user_id"))
             except Exception as e:
                 print(f"[FacebookAgent] Failed to save leads: {e}")
 
@@ -163,7 +164,7 @@ class FacebookAgent(BaseAgent):
             # 检查是否需要登录
             if await self._is_login_page(page):
                 print("[FacebookAgent] Detected login page")
-                return await self._get_mock_leads(keyword, limit)
+                return await self._get_mock_leads(keyword, limit) if os.getenv("DEMO_MODE", "false").lower() == "true" else []
 
             # 提取数据
             html = await page.content()

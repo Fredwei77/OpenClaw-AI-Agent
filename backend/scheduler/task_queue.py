@@ -478,7 +478,7 @@ class TaskQueue:
         )
 
         # 优先级 = (优先级数字, 时间戳) - 数字越小优先级越高
-        priority_value = (priority.value, queued_task.created_at.timestamp())
+        priority_value = (-priority.value, queued_task.created_at.timestamp())
 
         try:
             # 使用带超时的 put 避免任务丢失
@@ -529,6 +529,7 @@ class TaskQueue:
                             wait_time = await limiter.wait_time(task.platform)
                             print(f"[TaskQueue] Rate limited for {task.platform} (Redis), waiting {wait_time:.1f}s")
                             # 重新放回队列（稍后重试）
+                            self._concurrency_semaphore.release()
                             await asyncio.sleep(min(wait_time, 5.0))
                             await self._queue.put((priority, task))
                             continue
@@ -538,6 +539,7 @@ class TaskQueue:
                             wait_time = await limiter.wait_time()
                             print(f"[TaskQueue] Rate limited for {task.platform}, waiting {wait_time:.1f}s")
                             # 重新放回队列（稍后重试）
+                            self._concurrency_semaphore.release()
                             await asyncio.sleep(min(wait_time, 5.0))
                             await self._queue.put((priority, task))
                             continue
@@ -567,7 +569,7 @@ class TaskQueue:
 
             if executor:
                 # 执行任务
-                result = await executor(task.payload)
+                result = await executor({**task.payload, "user_id": task.user_id})
 
                 task.status = TaskStatus.COMPLETED
                 task.result = result if isinstance(result, dict) else {"data": result}
@@ -593,7 +595,7 @@ class TaskQueue:
             if task.retry_count < task.max_retries:
                 # 重试
                 task.status = TaskStatus.PENDING
-                priority = (task.priority.value, datetime.now().timestamp())
+                priority = (-task.priority.value, datetime.now().timestamp())
                 await self._queue.put((priority, task))
                 print(f"[TaskQueue] Task {task.task_id} scheduled for retry ({task.retry_count}/{task.max_retries})")
             else:

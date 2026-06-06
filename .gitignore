@@ -32,6 +32,8 @@ venv/
 env/
 .env/
 .venv/
+.test-deps/
+.runtime/
 ENV/
 env.bak/
 venv.bak/

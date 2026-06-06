@@ -37,9 +37,11 @@ CREATE TABLE IF NOT EXISTS leads (
     username VARCHAR(255),
     profile_url TEXT,
     email VARCHAR(255),
-    followers INT,
+    followers BIGINT,
     tags TEXT[],
     status VARCHAR(50) DEFAULT 'new',
+    metadata JSONB DEFAULT '{}'::jsonb,
+    quality_score INT DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -77,7 +79,8 @@ CREATE TABLE IF NOT EXISTS products (
     product_name TEXT,
     price NUMERIC,
     category VARCHAR(255),
-    rating NUMERIC
+    rating NUMERIC,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS ads (
@@ -103,6 +106,37 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS marketing_messages (
+    id SERIAL PRIMARY KEY,
+    lead_id INT,
+    user_id INT NOT NULL,
+    channel VARCHAR(50) NOT NULL,
+    subject TEXT,
+    body TEXT NOT NULL,
+    cta TEXT,
+    sequence_step INT DEFAULT 1,
+    status VARCHAR(50) DEFAULT 'draft',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS marketing_campaigns (
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    product_context TEXT,
+    lead_count INT DEFAULT 0,
+    generation_mode VARCHAR(50) DEFAULT 'local_fallback',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Upgrade existing local installations created by earlier init.sql versions.
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'::jsonb;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS quality_score INT DEFAULT 0;
+ALTER TABLE leads ALTER COLUMN followers TYPE BIGINT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS campaign_id INT;
+
 -- =====================================================
 -- INDEXES - Performance optimization for production
 -- =====================================================
@@ -110,7 +144,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- Leads table indexes
 CREATE INDEX IF NOT EXISTS idx_leads_user_status ON leads(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_leads_user_platform ON leads(user_id, platform);
-CREATE INDEX IF NOT EXISTS idx_leads_platform_username ON leads(platform, username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_user_platform_username
+    ON leads(user_id, platform, username);
 CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at DESC);
 
 -- Tasks table indexes
@@ -130,3 +165,8 @@ CREATE INDEX IF NOT EXISTS idx_accounts_risk_score ON accounts(risk_score);
 -- Products table indexes
 CREATE INDEX IF NOT EXISTS idx_products_user_id ON products(user_id);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
+CREATE INDEX IF NOT EXISTS idx_marketing_messages_user_id ON marketing_messages(user_id);
+CREATE INDEX IF NOT EXISTS idx_marketing_messages_lead_id ON marketing_messages(lead_id);
+CREATE INDEX IF NOT EXISTS idx_marketing_messages_user_status ON marketing_messages(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_marketing_messages_campaign_id ON marketing_messages(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_user_created_at ON marketing_campaigns(user_id, created_at DESC);

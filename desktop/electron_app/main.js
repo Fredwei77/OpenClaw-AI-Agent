@@ -4,10 +4,11 @@
  */
 
 const { app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, dialog } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 let mainWindow = null;
 let tray = null;
@@ -28,29 +29,90 @@ const frontendPath = app.isPackaged
     ? path.join(process.resourcesPath, 'www', 'index.html')
     : path.join(projectRoot, 'frontend', 'dist', 'index.html');
 
+function ensureUserConfig() {
+    if (!app.isPackaged) return;
+
+    const userConfigDir = app.getPath('userData');
+    const userEnvPath = path.join(userConfigDir, '.env');
+    const templatePath = path.join(process.resourcesPath, 'config', '.env.example');
+    fs.mkdirSync(userConfigDir, { recursive: true });
+
+    if (!fs.existsSync(userEnvPath)) {
+        const template = fs.existsSync(templatePath)
+            ? fs.readFileSync(templatePath, 'utf8')
+            : 'DATABASE_URL=postgresql://postgres:openclaw@localhost:5432/openclaw_db\nJWT_SECRET_KEY=__GENERATED__\nOPENROUTER_API_KEY=\nENVIRONMENT=development\n';
+        const secret = crypto.randomBytes(32).toString('base64url');
+        fs.writeFileSync(
+            userEnvPath,
+            template.replace('your-super-secret-key-change-this-in-production', secret).replace('__GENERATED__', secret),
+            { encoding: 'utf8', flag: 'wx' },
+        );
+        console.log('[Main] Created user config:', userEnvPath);
+    }
+
+    process.env.OPENCLAW_ENV_FILE = userEnvPath;
+}
+
+/**
+ * 自动检测 Chrome 用户数据目录（用于保持社交平台登录态）
+ * 仅在 CHROME_USER_DATA_DIR 环境变量未设置时生效
+ */
+function detectChromeUserDataDir() {
+    if (process.env.CHROME_USER_DATA_DIR) return;
+
+    const candidates = [];
+
+    if (process.platform === 'win32') {
+        const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+        candidates.push(
+            path.join(localAppData, 'Google', 'Chrome', 'User Data'),
+            path.join(localAppData, 'Microsoft', 'Edge', 'User Data'),
+        );
+    } else if (process.platform === 'darwin') {
+        candidates.push(
+            path.join(os.homedir(), 'Library', 'Application Support', 'Google', 'Chrome'),
+        );
+    } else {
+        candidates.push(
+            path.join(os.homedir(), '.config', 'google-chrome'),
+        );
+    }
+
+    for (const dir of candidates) {
+        if (fs.existsSync(dir) && fs.existsSync(path.join(dir, 'Default'))) {
+            process.env.CHROME_USER_DATA_DIR = dir;
+            console.log('[Main] Auto-detected Chrome user data dir:', dir);
+            return;
+        }
+    }
+
+    console.log('[Main] Chrome user data dir not found. Social platform scraping may require login.');
+}
+
 /**
  * 解析Python解释器路径
  */
 function resolvePythonExecutable() {
-    let pythonExecutable = 'python';
-
-    // 优先使用虚拟环境
-    const venvPaths = [
+    const candidates = [
         path.join(projectRoot, '.venv', 'Scripts', 'python.exe'),
         path.join(projectRoot, '.venv', 'bin', 'python'),
         path.join(__dirname, '../../.venv', 'Scripts', 'python.exe'),
         path.join(process.cwd(), '../../.venv', 'Scripts', 'python.exe'),
         path.join(process.cwd(), '../.venv', 'Scripts', 'python.exe'),
+        'python',
+        'python3',
     ];
 
-    for (const venvPath of venvPaths) {
-        if (fs.existsSync(venvPath)) {
-            pythonExecutable = venvPath;
-            break;
-        }
+    for (const candidate of [...new Set(candidates)]) {
+        if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) continue;
+        const check = spawnSync(candidate, ['-c', 'import asyncpg, bcrypt, fastapi, uvicorn'], {
+            windowsHide: true,
+            encoding: 'utf8',
+        });
+        if (!check.error && check.status === 0) return candidate;
+        console.warn('[Main] Ignoring Python without backend requirements:', candidate);
     }
-
-    return pythonExecutable;
+    throw new Error('No usable Python installation found. Install backend/requirements.txt into Python 3.11+.');
 }
 
 /**
@@ -63,7 +125,17 @@ function createPyProc() {
     }
 
     backendStarting = true;
-    const pythonExecutable = resolvePythonExecutable();
+    detectChromeUserDataDir();
+    let pythonExecutable;
+    try {
+        pythonExecutable = resolvePythonExecutable();
+    } catch (err) {
+        backendRunning = false;
+        backendStarting = false;
+        sendBackendStatus('error');
+        dialog.showErrorBox('Backend Error', err.message);
+        return;
+    }
 
     console.log('[Main] Starting Python backend...');
     console.log('[Main] Python executable:', pythonExecutable);
@@ -274,7 +346,7 @@ function createAppMenu() {
                             type: 'info',
                             title: '关于 OpenClaw AI Agent',
                             message: 'OpenClaw AI Agent',
-                            detail: `版本: 1.0.0\nElectron: ${process.versions.electron}\nChrome: ${process.versions.chrome}\nNode: ${process.versions.node}\n\n跨境电商获客AI代理系统`
+                            detail: `版本: ${app.getVersion()}\nElectron: ${process.versions.electron}\nChrome: ${process.versions.chrome}\nNode: ${process.versions.node}\n\n跨境电商获客AI代理系统`
                         });
                     }
                 }
@@ -386,6 +458,7 @@ ipcMain.handle('system:getInfo', () => {
 // 应用事件
 app.whenReady().then(() => {
     console.log('[Main] App ready, creating window...');
+    ensureUserConfig();
     createWindow();
     createTray();
     createPyProc();

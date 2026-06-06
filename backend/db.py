@@ -1,14 +1,35 @@
 import os
 import json
+import re
 import asyncpg
 from typing import List, Dict, Optional
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+load_dotenv(os.getenv("OPENCLAW_ENV_FILE") or os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Database connection pool
 _db_pool: Optional[asyncpg.Pool] = None
+MAX_REASONABLE_FOLLOWERS = 10_000_000_000
+
+
+def normalize_followers(value) -> int:
+    """Normalize scraped follower counts and cap obviously invalid values."""
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        if isinstance(value, str):
+            match = re.fullmatch(r"\s*([\d,]+(?:\.\d+)?)\s*([KMB])?\s*", value, re.IGNORECASE)
+            if not match:
+                return 0
+            number = float(match.group(1).replace(",", ""))
+            suffix = (match.group(2) or "").upper()
+            multiplier = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000}[suffix]
+            value = number * multiplier
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return min(max(count, 0), MAX_REASONABLE_FOLLOWERS)
 
 
 async def get_db_pool() -> asyncpg.Pool:
@@ -35,6 +56,30 @@ async def close_db_pool():
         _db_pool = None
 
 
+async def ensure_runtime_schema():
+    """Apply additive schema upgrades required by local desktop updates."""
+    pool = await get_db_pool()
+    statements = [
+        """CREATE TABLE IF NOT EXISTS marketing_campaigns (
+               id SERIAL PRIMARY KEY,
+               user_id INT NOT NULL,
+               name VARCHAR(255) NOT NULL,
+               product_context TEXT,
+               lead_count INT DEFAULT 0,
+               generation_mode VARCHAR(50) DEFAULT 'local_fallback',
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS campaign_id INT",
+        "CREATE INDEX IF NOT EXISTS idx_marketing_messages_campaign_id ON marketing_messages(campaign_id)",
+        "CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_user_created_at ON marketing_campaigns(user_id, created_at DESC)",
+    ]
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for statement in statements:
+                await conn.execute(statement)
+
+
 @asynccontextmanager
 async def get_db_connection():
     """Context manager for database connections from pool."""
@@ -53,12 +98,10 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
     """
     if not leads:
         return 0
+    if user_id is None:
+        raise ValueError("user_id is required when saving leads")
 
-    try:
-        pool = await get_db_pool()
-    except Exception as e:
-        print(f"[DB Error] Cannot connect to database: {e}")
-        return 0
+    pool = await get_db_pool()
 
     inserted_count = 0
 
@@ -68,12 +111,12 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
             query = """
                 INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'new')
-                ON CONFLICT (platform, username)
+                ON CONFLICT (user_id, platform, username)
                 DO UPDATE SET
                     profile_url = EXCLUDED.profile_url,
                     email = COALESCE(EXCLUDED.email, leads.email),
                     followers = EXCLUDED.followers,
-                    tags = leads.tags || EXCLUDED.tags,
+                    tags = COALESCE(leads.tags, '{}') || EXCLUDED.tags,
                     created_at = CURRENT_TIMESTAMP
             """
 
@@ -84,23 +127,20 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
                     lead.get('username', ''),
                     lead.get('profile_url', ''),
                     lead.get('email', None),
-                    lead.get('followers', 0),
+                    normalize_followers(lead.get('followers', 0)),
                     lead.get('tags', [])
                 )
                 for lead in leads
             ]
 
             async with conn.transaction():
-                result = await conn.executemany(query, values)
-                # executemany returns status string like "INSERT 0 5"
-                if result and 'INSERT' in result:
-                    parts = result.split()
-                    if len(parts) >= 3:
-                        inserted_count = int(parts[2])
+                await conn.executemany(query, values)
+                inserted_count = len(values)
 
             print(f"[DB] Successfully upserted {inserted_count} leads to the database.")
     except Exception as e:
         print(f"[DB Error] Failed to save leads: {e}")
+        raise
 
     return inserted_count
 
@@ -112,6 +152,8 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
     """
     if not leads:
         return 0
+    if user_id is None:
+        raise ValueError("user_id is required when saving leads")
 
     pool = await get_db_pool()
     inserted_count = 0
@@ -121,12 +163,12 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
             query = """
                 INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'new')
-                ON CONFLICT (platform, username)
+                ON CONFLICT (user_id, platform, username)
                 DO UPDATE SET
                     profile_url = EXCLUDED.profile_url,
                     email = COALESCE(EXCLUDED.email, leads.email),
                     followers = GREATEST(EXCLUDED.followers, leads.followers),
-                    tags = leads.tags || EXCLUDED.tags
+                    tags = COALESCE(leads.tags, '{}') || EXCLUDED.tags
             """
 
             # Convert to tuple list for executemany
@@ -137,22 +179,20 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
                     lead.get('username', ''),
                     lead.get('profile_url', ''),
                     lead.get('email', None),
-                    lead.get('followers', 0),
+                    normalize_followers(lead.get('followers', 0)),
                     lead.get('tags', [])
                 )
                 for lead in leads
             ]
 
             async with conn.transaction():
-                result = await conn.executemany(query, values)
-                if result and 'INSERT' in result:
-                    parts = result.split()
-                    if len(parts) >= 3:
-                        inserted_count = int(parts[2])
+                await conn.executemany(query, values)
+                inserted_count = len(values)
 
             print(f"[DB] Batch upserted {inserted_count}/{len(leads)} leads.")
     except Exception as e:
         print(f"[DB Error] Batch save failed: {e}")
+        raise
 
     return inserted_count
 
@@ -194,16 +234,16 @@ async def get_task(task_id: int) -> Optional[Dict]:
         return None
 
 
-async def save_lead_research(lead_id: int, metadata: dict, quality_score: int) -> bool:
+async def save_lead_research(lead_id: int, user_id: int, metadata: dict, quality_score: int) -> bool:
     """Save research metadata and quality score to a lead."""
     pool = await get_db_pool()
     try:
         async with pool.acquire() as conn:
             await conn.execute(
                 """UPDATE leads
-                   SET metadata = $2, quality_score = $3
-                   WHERE id = $1""",
-                lead_id, json.dumps(metadata), quality_score
+                   SET metadata = $3, quality_score = $4
+                   WHERE id = $1 AND user_id = $2""",
+                lead_id, user_id, json.dumps(metadata), quality_score
             )
             return True
     except Exception as e:
@@ -212,23 +252,54 @@ async def save_lead_research(lead_id: int, metadata: dict, quality_score: int) -
 
 
 async def save_marketing_messages(messages: list) -> int:
-    """Batch insert generated marketing messages."""
+    """Replace draft messages for the same lead/channel and insert fresh drafts."""
     if not messages:
         return 0
     pool = await get_db_pool()
     try:
         async with pool.acquire() as conn:
             count = 0
-            for msg in messages:
-                await conn.execute(
-                    """INSERT INTO marketing_messages (lead_id, user_id, channel, subject, body, cta, sequence_step, status)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
-                    msg.get('lead_id'), msg.get('user_id'), msg.get('channel'),
-                    msg.get('subject', ''), msg.get('body', ''), msg.get('cta', ''),
-                    msg.get('sequence_step', 1), msg.get('status', 'draft')
-                )
-                count += 1
+            async with conn.transaction():
+                for msg in messages:
+                    if msg.get('campaign_id') is None:
+                        await conn.execute(
+                            """DELETE FROM marketing_messages
+                               WHERE lead_id = $1 AND user_id = $2 AND channel = $3
+                                 AND sequence_step = $4 AND status = 'draft' AND campaign_id IS NULL""",
+                            msg.get('lead_id'), msg.get('user_id'), msg.get('channel'),
+                            msg.get('sequence_step', 1),
+                        )
+                    await conn.execute(
+                        """INSERT INTO marketing_messages (lead_id, user_id, campaign_id, channel, subject, body, cta, sequence_step, status)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)""",
+                        msg.get('lead_id'), msg.get('user_id'), msg.get('campaign_id'),
+                        msg.get('channel'), msg.get('subject', ''), msg.get('body', ''),
+                        msg.get('cta', ''), msg.get('sequence_step', 1), msg.get('status', 'draft')
+                    )
+                    count += 1
             return count
     except Exception as e:
         print(f"[DB Error] Failed to save marketing messages: {e}")
-        return 0
+        raise
+
+
+async def create_marketing_campaign(
+    user_id: int,
+    name: str,
+    product_context: str,
+    lead_count: int,
+    generation_mode: str,
+) -> int:
+    """Create a persisted pipeline batch for the recent campaigns workspace."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            """INSERT INTO marketing_campaigns (user_id, name, product_context, lead_count, generation_mode)
+               VALUES ($1, $2, $3, $4, $5)
+               RETURNING id""",
+            user_id,
+            name,
+            product_context,
+            lead_count,
+            generation_mode,
+        )

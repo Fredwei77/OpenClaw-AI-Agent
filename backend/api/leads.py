@@ -1,15 +1,20 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Any, Optional, List
 from datetime import datetime
+import json
 import logging
 from .auth import get_db_pool, get_current_user, UserResponse
 
 logger = logging.getLogger(__name__)
+MAX_REASONABLE_FOLLOWERS = 10_000_000_000
 
 router = APIRouter()
 
-VALID_PLATFORMS = {"instagram", "tiktok", "x", "facebook", "youtube", "linkedin"}
+VALID_PLATFORMS = {
+    "instagram", "tiktok", "x", "facebook", "youtube", "linkedin",
+    "shopify", "google", "duckduckgo", "directory",
+}
 VALID_LEAD_STATUSES = {"new", "contacted", "qualified", "converted", "lost"}
 
 
@@ -18,7 +23,7 @@ class LeadCreate(BaseModel):
     username: str = Field(..., min_length=1, max_length=255)
     profile_url: Optional[str] = None
     email: Optional[str] = None
-    followers: int = Field(default=0, ge=0)
+    followers: int = Field(default=0, ge=0, le=MAX_REASONABLE_FOLLOWERS)
     tags: List[str] = Field(default_factory=list)
 
 
@@ -27,7 +32,7 @@ class LeadUpdate(BaseModel):
     username: Optional[str] = None
     profile_url: Optional[str] = None
     email: Optional[str] = None
-    followers: Optional[int] = Field(default=None, ge=0)
+    followers: Optional[int] = Field(default=None, ge=0, le=MAX_REASONABLE_FOLLOWERS)
     tags: Optional[List[str]] = None
     status: Optional[str] = None
 
@@ -41,6 +46,8 @@ class LeadResponse(BaseModel):
     followers: int
     tags: List[str]
     status: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    quality_score: int = 0
     user_id: Optional[int]
     created_at: datetime
 
@@ -53,6 +60,41 @@ class LeadListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class MarketingMessageResponse(BaseModel):
+    id: int
+    channel: str
+    subject: str
+    body: str
+    cta: str
+    sequence_step: int
+    status: str
+    created_at: datetime
+
+
+class LeadDetailResponse(LeadResponse):
+    marketing_messages: List[MarketingMessageResponse] = Field(default_factory=list)
+
+
+def _to_lead_response(row) -> LeadResponse:
+    metadata = row['metadata'] or {}
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
+    return LeadResponse(
+        id=row['id'],
+        platform=row['platform'],
+        username=row['username'],
+        profile_url=row['profile_url'],
+        email=row['email'],
+        followers=row['followers'],
+        tags=row['tags'] or [],
+        status=row['status'] or 'new',
+        metadata=metadata,
+        quality_score=row['quality_score'] or 0,
+        user_id=row['user_id'],
+        created_at=row['created_at'],
+    )
 
 
 @router.get("/", response_model=LeadListResponse)
@@ -128,7 +170,7 @@ async def get_leads(
             # Get paginated results
             offset = (page - 1) * page_size
             query = f"""
-                SELECT id, platform, username, profile_url, email, followers, tags, status, user_id, created_at
+                SELECT id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at
                 FROM leads
                 {where_clause}
                 ORDER BY created_at DESC
@@ -139,18 +181,7 @@ async def get_leads(
             rows = await conn.fetch(query, *params)
 
             leads = [
-                LeadResponse(
-                    id=row['id'],
-                    platform=row['platform'],
-                    username=row['username'],
-                    profile_url=row['profile_url'],
-                    email=row['email'],
-                    followers=row['followers'],
-                    tags=row['tags'] or [],
-                    status=getattr(row, 'status', 'new'),
-                    user_id=row['user_id'],
-                    created_at=row['created_at']
-                )
+                _to_lead_response(row)
                 for row in rows
             ]
 
@@ -167,7 +198,7 @@ async def get_leads(
             raise HTTPException(status_code=500, detail="Database error")
 
 
-@router.get("/{lead_id}", response_model=LeadResponse)
+@router.get("/{lead_id}", response_model=LeadDetailResponse)
 async def get_lead(
     lead_id: int,
     current_user: UserResponse = Depends(get_current_user)
@@ -177,24 +208,21 @@ async def get_lead(
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
-                "SELECT id, platform, username, profile_url, email, followers, tags, status, user_id, created_at FROM leads WHERE id = $1",
-                lead_id
+                "SELECT id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at FROM leads WHERE id = $1 AND user_id = $2",
+                lead_id, current_user.id
             )
             if not row:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
-            return LeadResponse(
-                id=row['id'],
-                platform=row['platform'],
-                username=row['username'],
-                profile_url=row['profile_url'],
-                email=row['email'],
-                followers=row['followers'],
-                tags=row['tags'] or [],
-                status=getattr(row, 'status', 'new'),
-                user_id=row['user_id'],
-                created_at=row['created_at']
+            messages = await conn.fetch(
+                """SELECT id, channel, subject, body, cta, sequence_step, status, created_at
+                   FROM marketing_messages
+                   WHERE lead_id = $1 AND user_id = $2
+                   ORDER BY created_at DESC, id DESC""",
+                lead_id, current_user.id
+            )
+            return LeadDetailResponse(
+                **_to_lead_response(row).model_dump(),
+                marketing_messages=[MarketingMessageResponse(**dict(message)) for message in messages]
             )
         except HTTPException:
             raise
@@ -218,22 +246,11 @@ async def create_lead(
             row = await conn.fetchrow(
                 """INSERT INTO leads (platform, username, profile_url, email, followers, tags, status, user_id)
                    VALUES ($1, $2, $3, $4, $5, $6, 'new', $7)
-                   RETURNING id, platform, username, profile_url, email, followers, tags, status, user_id, created_at""",
+                   RETURNING id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at""",
                 lead.platform, lead.username, lead.profile_url, lead.email,
                 lead.followers, lead.tags, current_user.id
             )
-            return LeadResponse(
-                id=row['id'],
-                platform=row['platform'],
-                username=row['username'],
-                profile_url=row['profile_url'],
-                email=row['email'],
-                followers=row['followers'],
-                tags=row['tags'] or [],
-                status=row['status'],
-                user_id=row['user_id'],
-                created_at=row['created_at']
-            )
+            return _to_lead_response(row)
         except HTTPException:
             raise
         except Exception:
@@ -251,11 +268,9 @@ async def update_lead(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id FROM leads WHERE id = $1", lead_id)
+            row = await conn.fetchrow("SELECT id, user_id FROM leads WHERE id = $1 AND user_id = $2", lead_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
 
             updates = []
             params = []
@@ -303,26 +318,15 @@ async def update_lead(
             if not updates:
                 raise HTTPException(status_code=400, detail="No fields to update")
 
-            params.append(lead_id)
+            params.extend([lead_id, current_user.id])
             query = f"""
                 UPDATE leads SET {', '.join(updates)}
-                WHERE id = ${param_idx}
-                RETURNING id, platform, username, profile_url, email, followers, tags, status, user_id, created_at
+                WHERE id = ${param_idx} AND user_id = ${param_idx + 1}
+                RETURNING id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at
             """
 
             row = await conn.fetchrow(query, *params)
-            return LeadResponse(
-                id=row['id'],
-                platform=row['platform'],
-                username=row['username'],
-                profile_url=row['profile_url'],
-                email=row['email'],
-                followers=row['followers'],
-                tags=row['tags'] or [],
-                status=row['status'],
-                user_id=row['user_id'],
-                created_at=row['created_at']
-            )
+            return _to_lead_response(row)
         except HTTPException:
             raise
         except Exception as e:
@@ -340,13 +344,15 @@ async def delete_lead(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id FROM leads WHERE id = $1", lead_id)
+            row = await conn.fetchrow("SELECT id, user_id FROM leads WHERE id = $1 AND user_id = $2", lead_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Lead not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
-
-            await conn.execute("DELETE FROM leads WHERE id = $1", lead_id)
+            async with conn.transaction():
+                await conn.execute(
+                    "DELETE FROM marketing_messages WHERE lead_id = $1 AND user_id = $2",
+                    lead_id, current_user.id
+                )
+                await conn.execute("DELETE FROM leads WHERE id = $1 AND user_id = $2", lead_id, current_user.id)
         except HTTPException:
             raise
         except Exception as e:

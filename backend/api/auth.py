@@ -15,15 +15,10 @@ router = APIRouter()
 # JWT Configuration
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
-    import warnings
     import hashlib
-    warnings.warn(
-        "JWT_SECRET_KEY not set! Using a deterministic dev key. "
-        "Set JWT_SECRET_KEY in environment for production.",
-        UserWarning
-    )
-    # Deterministic dev key — survives restarts so tokens stay valid
-    SECRET_KEY = hashlib.sha256(b"openclaw-dev-key-stable").hexdigest()
+    if os.getenv("ENVIRONMENT", "development").lower() == "production":
+        raise RuntimeError("JWT_SECRET_KEY must be set in production")
+    SECRET_KEY = hashlib.sha256(b"openclaw-local-dev-key").hexdigest()
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30

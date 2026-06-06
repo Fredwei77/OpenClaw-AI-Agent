@@ -21,31 +21,41 @@ from dotenv import load_dotenv
 # 确保能读到根目录级别的自定义包（修复 Electron 作为外部工作目录拉起时的 ModuleNotFoundError）
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Load env variables from the project root .env file
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env'))
+# Load desktop user config when provided, otherwise use the project root .env file.
+_env_file = os.getenv("OPENCLAW_ENV_FILE") or os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+load_dotenv(_env_file)
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
-from api import auth, agents, tasks, leads, products, analytics
+from api import auth, agents, tasks, leads, products, analytics, outreach, system
 from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
+
+readiness = {
+    "database": False,
+    "browser_pool": False,
+    "task_queue": False,
+}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown lifecycle."""
     # Startup
-    from db import get_db_pool
+    from db import ensure_runtime_schema, get_db_pool
     try:
         await get_db_pool()
-        logger.info("Database pool initialized")
+        await ensure_runtime_schema()
+        readiness["database"] = True
+        logger.info("Database pool initialized and runtime schema verified")
     except Exception as e:
         logger.error(f"Database pool initialization failed: {e}")
 
     try:
         from browser_cluster.manager.browser_pool import init_browser_pool
         await init_browser_pool()
+        readiness["browser_pool"] = True
         logger.info("Browser pool initialized")
     except Exception as e:
         logger.error(f"Browser pool initialization failed: {e}")
@@ -53,6 +63,7 @@ async def lifespan(app: FastAPI):
     try:
         from scheduler.task_queue import init_task_queue
         await init_task_queue()
+        readiness["task_queue"] = True
         logger.info("Task queue initialized")
     except Exception as e:
         logger.error(f"Task queue initialization failed: {e}")
@@ -107,7 +118,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"Redis client cleanup failed: {e}")
 
 
-app = FastAPI(title="OpenClaw AI Agent API", version="1.0.0", description="Backend API for Cross-Border Ecommerce Agents", lifespan=lifespan)
+app = FastAPI(title="OpenClaw AI Agent API", version="1.1.0", description="Backend API for Cross-Border Ecommerce Agents", lifespan=lifespan)
 
 # CORS configuration - configurable via environment variables
 # For production, set ALLOWED_ORIGINS to specific domains
@@ -147,6 +158,8 @@ app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
 app.include_router(products.router, prefix="/api/products", tags=["products"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
+app.include_router(outreach.router, prefix="/api/outreach", tags=["outreach"])
+app.include_router(system.router, prefix="/api/system", tags=["system"])
 
 
 @app.get("/")
@@ -157,11 +170,14 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Health check endpoint for monitoring."""
-    return {
-        "status": "healthy",
-        "version": "1.0.0",
-        "environment": os.getenv("ENVIRONMENT", "development")
+    is_ready = readiness["database"] and readiness["task_queue"]
+    content = {
+        "status": "healthy" if is_ready else "degraded",
+        "version": "1.1.0",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "components": readiness,
     }
+    return JSONResponse(status_code=200 if is_ready else 503, content=content)
 
 
 @app.get("/metrics")

@@ -1,6 +1,6 @@
 {
   "name": "openclaw-ai-agent",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OpenClaw AI - Cross-Border Ecommerce AI Agent",
   "main": "main.js",
   "scripts": {
@@ -57,8 +57,8 @@
         "to": "plugins"
       },
       {
-        "from": "../../.env",
-        "to": ".env"
+        "from": "../../.env.example",
+        "to": "config/.env.example"
       }
     ]
   }

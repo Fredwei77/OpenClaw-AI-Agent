@@ -87,7 +87,7 @@ async def get_products(
         if category:
             if category not in VALID_CATEGORIES:
                 raise HTTPException(status_code=400, detail=f"Invalid category. Must be one of {VALID_CATEGORIES}")
-            conditions.append(f"AND p.category = ${param_idx}")
+            conditions.append(f"p.category = ${param_idx}")
             params.append(category)
             param_idx += 1
 
@@ -96,28 +96,28 @@ async def get_products(
             store = await conn.fetchrow("SELECT user_id FROM stores WHERE id = $1", store_id)
             if not store or store['user_id'] != current_user.id:
                 raise HTTPException(status_code=403, detail="Access denied to this store")
-            conditions.append(f"AND p.store_id = ${param_idx}")
+            conditions.append(f"p.store_id = ${param_idx}")
             params.append(store_id)
             param_idx += 1
 
         if search:
             escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            conditions.append(f"AND p.product_name ILIKE ${param_idx}")
+            conditions.append(f"p.product_name ILIKE ${param_idx}")
             params.append(f"%{escaped}%")
             param_idx += 1
 
         if min_price is not None:
-            conditions.append(f"AND p.price >= ${param_idx}")
+            conditions.append(f"p.price >= ${param_idx}")
             params.append(min_price)
             param_idx += 1
 
         if max_price is not None:
-            conditions.append(f"AND p.price <= ${param_idx}")
+            conditions.append(f"p.price <= ${param_idx}")
             params.append(max_price)
             param_idx += 1
 
         if min_rating is not None:
-            conditions.append(f"AND p.rating >= ${param_idx}")
+            conditions.append(f"p.rating >= ${param_idx}")
             params.append(min_rating)
             param_idx += 1
 
@@ -169,13 +169,11 @@ async def get_product(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, store_id, product_name, price, category, rating, user_id, created_at FROM products WHERE id = $1",
-            product_id
+            "SELECT id, store_id, product_name, price, category, rating, user_id, created_at FROM products WHERE id = $1 AND user_id = $2",
+            product_id, current_user.id
         )
         if not row:
             raise HTTPException(status_code=404, detail="Product not found")
-        if row['user_id'] and row['user_id'] != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
         return ProductResponse(
             id=row['id'],
             store_id=row['store_id'],
@@ -229,11 +227,9 @@ async def update_product(
     """Update a product."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT id, user_id FROM products WHERE id = $1", product_id)
+        row = await conn.fetchrow("SELECT id, user_id FROM products WHERE id = $1 AND user_id = $2", product_id, current_user.id)
         if not row:
             raise HTTPException(status_code=404, detail="Product not found")
-        if row['user_id'] and row['user_id'] != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
 
         updates = []
         params = []
@@ -264,10 +260,10 @@ async def update_product(
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
 
-        params.append(product_id)
+        params.extend([product_id, current_user.id])
         query = f"""
             UPDATE products SET {', '.join(updates)}
-            WHERE id = ${param_idx}
+            WHERE id = ${param_idx} AND user_id = ${param_idx + 1}
             RETURNING id, store_id, product_name, price, category, rating, user_id, created_at
         """
 
@@ -292,10 +288,7 @@ async def delete_product(
     """Delete a product."""
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT id, user_id FROM products WHERE id = $1", product_id)
+        row = await conn.fetchrow("SELECT id, user_id FROM products WHERE id = $1 AND user_id = $2", product_id, current_user.id)
         if not row:
             raise HTTPException(status_code=404, detail="Product not found")
-        if row['user_id'] and row['user_id'] != current_user.id:
-            raise HTTPException(status_code=403, detail="Access denied")
-
-        await conn.execute("DELETE FROM products WHERE id = $1", product_id)
+        await conn.execute("DELETE FROM products WHERE id = $1 AND user_id = $2", product_id, current_user.id)

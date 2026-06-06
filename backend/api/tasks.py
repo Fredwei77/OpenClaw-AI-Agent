@@ -162,13 +162,11 @@ async def get_task(
         try:
             row = await conn.fetchrow(
                 """SELECT id, agent_name, task_type, payload, status, result, error, created_at, started_at, completed_at, user_id
-                   FROM tasks WHERE id = $1""",
-                task_id
+                   FROM tasks WHERE id = $1 AND user_id = $2""",
+                task_id, current_user.id
             )
             if not row:
                 raise HTTPException(status_code=404, detail="Task not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
             return TaskResponse(
                 id=row['id'],
                 agent_name=row['agent_name'],
@@ -256,11 +254,9 @@ async def update_task(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id FROM tasks WHERE id = $1", task_id)
+            row = await conn.fetchrow("SELECT id, user_id FROM tasks WHERE id = $1 AND user_id = $2", task_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Task not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
 
             updates = []
             params = []
@@ -287,10 +283,10 @@ async def update_task(
             if not updates:
                 raise HTTPException(status_code=400, detail="No fields to update")
 
-            params.append(task_id)
+            params.extend([task_id, current_user.id])
             query = f"""
                 UPDATE tasks SET {', '.join(updates)}
-                WHERE id = ${param_idx}
+                WHERE id = ${param_idx} AND user_id = ${param_idx + 1}
                 RETURNING id, agent_name, task_type, payload, status, result, error, created_at, started_at, completed_at, user_id
             """
 
@@ -323,17 +319,15 @@ async def delete_task(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id, status FROM tasks WHERE id = $1", task_id)
+            row = await conn.fetchrow("SELECT id, user_id, status FROM tasks WHERE id = $1 AND user_id = $2", task_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Task not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
 
             # Cannot delete running tasks
             if row['status'] == 'running':
                 raise HTTPException(status_code=400, detail="Cannot delete a running task")
 
-            await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
+            await conn.execute("DELETE FROM tasks WHERE id = $1 AND user_id = $2", task_id, current_user.id)
         except HTTPException:
             raise
         except Exception:
@@ -350,11 +344,9 @@ async def cancel_task(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id, status FROM tasks WHERE id = $1", task_id)
+            row = await conn.fetchrow("SELECT id, user_id, status FROM tasks WHERE id = $1 AND user_id = $2", task_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Task not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
 
             if row['status'] not in ('pending', 'running'):
                 raise HTTPException(status_code=400, detail=f"Cannot cancel task with status: {row['status']}")
@@ -366,9 +358,9 @@ async def cancel_task(
             # Update database
             row = await conn.fetchrow(
                 """UPDATE tasks SET status = 'cancelled', completed_at = CURRENT_TIMESTAMP
-                   WHERE id = $1
+                   WHERE id = $1 AND user_id = $2
                    RETURNING id, agent_name, task_type, payload, status, result, error, created_at, started_at, completed_at, user_id""",
-                task_id
+                task_id, current_user.id
             )
 
             return TaskResponse(
@@ -399,11 +391,9 @@ async def retry_task(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         try:
-            row = await conn.fetchrow("SELECT id, user_id, status, agent_name, task_type, payload FROM tasks WHERE id = $1", task_id)
+            row = await conn.fetchrow("SELECT id, user_id, status, agent_name, task_type, payload FROM tasks WHERE id = $1 AND user_id = $2", task_id, current_user.id)
             if not row:
                 raise HTTPException(status_code=404, detail="Task not found")
-            if row['user_id'] and row['user_id'] != current_user.id:
-                raise HTTPException(status_code=403, detail="Access denied")
 
             if row['status'] != 'failed':
                 raise HTTPException(status_code=400, detail=f"Cannot retry task with status: {row['status']}")
@@ -413,9 +403,9 @@ async def retry_task(
             # Update status and reset
             row = await conn.fetchrow(
                 """UPDATE tasks SET status = 'pending', error = NULL, completed_at = NULL
-                   WHERE id = $1
+                   WHERE id = $1 AND user_id = $2
                    RETURNING id, agent_name, task_type, payload, status, result, error, created_at, started_at, completed_at, user_id""",
-                task_id
+                task_id, current_user.id
             )
 
             # Submit to queue

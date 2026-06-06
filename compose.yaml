@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: openclaw_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: openclaw
+    ports:
+      - "5432:5432"
+    volumes:
+      - openclaw-postgres-data:/var/lib/postgresql/data
+      - ./database/migrations/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d openclaw_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  openclaw-postgres-data:
