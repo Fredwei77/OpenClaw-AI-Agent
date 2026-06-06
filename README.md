@@ -244,3 +244,8 @@ Distributed under the MIT License. See [`LICENSE`](LICENSE) for more information
 
 Built with ❤️ by [Fred Wei](https://github.com/Fredwei77)
 Questions? → [Open an Issue](https://github.com/Fredwei77/OpenClaw-AI-Agent/issues/new)
+
+支持我
+----------
+如果您觉得这个项目对您有帮助，您可以扫描以下二维码进行捐赠：
+<img width="633" height="795" alt="zhifubao" src="https://github.com/user-attachments/assets/ecae1c5f-b224-49bf-8b91-18241c7fd455" />
