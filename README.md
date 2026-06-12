@@ -116,7 +116,10 @@ cp .env.example .env
 ```
 
 ```env
-OPENROUTER_API_KEY=sk-...     # Recommended: supports GPT-4 / Claude / DeepSeek
+OPENROUTER_API_KEY=sk-or-...  # Required for real AI output
+OPENROUTER_AUTOMATION_MODEL=qwen/qwen3-30b-a3b-instruct-2507
+OPENROUTER_AUTOMATION_FALLBACK_MODELS=google/gemini-2.5-flash,openai/gpt-4o-mini
+AUTOMATION_SECRET_KEY=replace-with-a-long-random-secret
 DATABASE_URL=postgresql://postgres:password@localhost:5432/openclaw_db
 ```
 
@@ -145,6 +148,53 @@ cd frontend && npm run dev
 | **Anti-Ban Engine** | Residential Proxy + Rate Limiting | Multi-account safe rotation, prevents IP/fingerprint linking |
 | **Browser Cluster** | Playwright + Stealth Mode | Isolated browser environments, simulates real user behavior |
 | **Local Database** | PostgreSQL | All customer data stored on your own server, GDPR-compliant |
+
+---
+
+## 🤖 AI Lead Automation
+
+The AI Lead Automation workbench turns inbound messages into structured intent analysis and governed replies:
+
+```text
+Inbound Webhook -> AI intent/scoring -> Policy checks -> Draft/Review/Automatic
+                -> Delivery queue -> Signed outbound Webhook -> Audit and analytics
+```
+
+### Capabilities
+
+- **Real AI output:** OpenRouter structured generation with configurable primary and fallback models.
+- **Safe fallback:** local deterministic analysis remains available when the provider is disabled or unavailable.
+- **Governed replies:** draft, manual review, and automatic modes with confidence thresholds, handoff scores, blocked terms, and hourly limits.
+- **Human takeover:** operators can take over or release conversations from the unified inbox.
+- **Reliable delivery:** persisted outbound queue with retry backoff, lease recovery, and idempotency keys.
+- **Security and audit:** encrypted signing secrets, HMAC-SHA256 callbacks, AI call logs, token/latency metrics, run history, and delivery history.
+
+### Provider Modes
+
+| Mode | Behavior |
+|------|----------|
+| `local` | Uses local deterministic analysis only |
+| `hybrid` | Uses OpenRouter when configured and falls back locally on provider failure |
+| `openrouter` | Requires successful OpenRouter structured generation |
+
+### Outbound Webhook Contract
+
+Outbound callbacks include `X-OpenClaw-Timestamp`, `X-OpenClaw-Signature`, and `Idempotency-Key`. Verify the signature as:
+
+```text
+HMAC-SHA256(signing_secret, timestamp + "." + raw_request_body)
+```
+
+Useful API routes include:
+
+- `PUT /api/automations/settings` - configure provider, reply policy, and outbound Webhook.
+- `POST /api/webhooks/simulate` - submit a generic inbound event for local testing.
+- `GET /api/automations/ai-calls/recent` - inspect model calls and token/latency data.
+- `GET /api/automations/deliveries/recent` - inspect delivery attempts and retry status.
+- `POST /api/automations/messages/{message_id}/approve` - approve a reviewed reply.
+
+> [!IMPORTANT]
+> The current implementation connects only to generic inbound and outbound Webhooks. No real social media account or platform-specific connector is enabled yet.
 
 ---
 
@@ -189,6 +239,7 @@ graph TD
 - [x] Local PostgreSQL Data Storage
 - [x] React Frontend + FastAPI Backend
 - [x] Residential Proxy + Multi-Account Rotation
+- [x] AI Lead Automation (OpenRouter + local fallback + signed Webhook delivery)
 
 ### 🔄 In Development
 - [ ] TikTok Auto Lead Generation Module

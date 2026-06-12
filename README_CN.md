@@ -116,7 +116,10 @@ cp .env.example .env
 ```
 
 ```env
-OPENROUTER_API_KEY=sk-...     # 推荐，支持 GPT-4 / Claude / DeepSeek
+OPENROUTER_API_KEY=sk-or-...  # 启用真实 AI 输出时必填
+OPENROUTER_AUTOMATION_MODEL=qwen/qwen3-30b-a3b-instruct-2507
+OPENROUTER_AUTOMATION_FALLBACK_MODELS=google/gemini-2.5-flash,openai/gpt-4o-mini
+AUTOMATION_SECRET_KEY=请替换为足够长的随机密钥
 DATABASE_URL=postgresql://postgres:password@localhost:5432/openclaw_db
 ```
 
@@ -144,6 +147,53 @@ cd frontend && npm run dev
 | **Anti-Ban Engine** | Residential Proxy + Rate Limiting | 多账号安全轮换，防止 IP/指纹关联 |
 | **Browser Cluster** | Playwright + Stealth Mode | 独立浏览器环境，模拟真实用户行为 |
 | **Local Database** | PostgreSQL | 所有客户数据存在你自己服务器，GDPR 合规 |
+
+---
+
+## 🤖 AI 获客自动化
+
+AI 获客自动化工作台将入站消息转换为结构化意图分析，并根据治理策略生成和发送回复：
+
+```text
+入站 Webhook -> AI 意图识别/评分 -> 策略检查 -> 草稿/人工审核/自动回复
+             -> 投递队列 -> 签名出站 Webhook -> 审计与分析
+```
+
+### 已实现能力
+
+- **真实 AI 输出：** 通过 OpenRouter 生成结构化结果，支持配置主模型与备用模型。
+- **本地降级：** AI 服务未启用或调用失败时，可使用确定性的本地分析逻辑继续处理。
+- **回复治理：** 支持草稿、人工审核、自动回复三种模式，以及置信度阈值、转人工评分、敏感词和每小时限速。
+- **人工接管：** 可在统一收件箱中接管或释放会话。
+- **可靠投递：** 持久化出站队列、指数退避重试、租约恢复和幂等键。
+- **安全审计：** 签名密钥加密存储、HMAC-SHA256 回调签名、AI 调用日志、Token/延迟指标、运行记录和投递记录。
+
+### AI 提供方模式
+
+| 模式 | 行为 |
+|------|------|
+| `local` | 仅使用本地确定性分析 |
+| `hybrid` | 优先使用 OpenRouter，调用失败时自动降级到本地分析 |
+| `openrouter` | 强制要求 OpenRouter 成功返回结构化结果 |
+
+### 出站 Webhook 约定
+
+出站回调包含 `X-OpenClaw-Timestamp`、`X-OpenClaw-Signature` 和 `Idempotency-Key`。接收方应按以下方式校验签名：
+
+```text
+HMAC-SHA256(signing_secret, timestamp + "." + raw_request_body)
+```
+
+常用 API：
+
+- `PUT /api/automations/settings`：配置 AI 提供方、回复策略和出站 Webhook。
+- `POST /api/webhooks/simulate`：提交通用入站事件进行本地测试。
+- `GET /api/automations/ai-calls/recent`：查看模型调用、Token 和延迟数据。
+- `GET /api/automations/deliveries/recent`：查看投递尝试和重试状态。
+- `POST /api/automations/messages/{message_id}/approve`：批准待审核回复。
+
+> [!IMPORTANT]
+> 当前版本只接通通用入站和出站 Webhook，尚未启用任何真实社媒账号或平台专用连接器。
 
 ---
 
@@ -188,6 +238,7 @@ graph TD
 - [x] 本地 PostgreSQL 数据存储
 - [x] React 前端 + FastAPI 后端
 - [x] 住宅代理 + 多账号轮换
+- [x] AI 获客自动化（OpenRouter + 本地降级 + 签名 Webhook 投递）
 
 ### 🔄 开发中
 - [ ] TikTok 自动获客模块
