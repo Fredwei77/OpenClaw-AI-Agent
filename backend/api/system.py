@@ -9,6 +9,7 @@ from browser_cluster.manager.browser_pool import get_browser_pool
 from scheduler.task_queue import get_task_queue
 
 from .agents import API_KEY, MARKETING_MODEL, _marketing_model_candidates
+from automation.providers import DEFAULT_MODEL, automation_ai_provider
 from .auth import UserResponse, get_current_user, get_db_pool
 
 router = APIRouter()
@@ -66,6 +67,8 @@ async def get_runtime_status(
             "marketing_model": MARKETING_MODEL,
             "fallback_models": _marketing_model_candidates()[1:],
             "mode": "online" if API_KEY else "local_fallback",
+            "automation_model": DEFAULT_MODEL,
+            "automation_provider_configured": automation_ai_provider.configured,
         },
         "configuration": {
             "database_url": bool(os.getenv("DATABASE_URL")),

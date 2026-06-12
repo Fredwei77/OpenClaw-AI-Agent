@@ -29,7 +29,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
-from api import auth, agents, tasks, leads, products, analytics, outreach, system
+from api import (
+    analytics,
+    agents,
+    auth,
+    automations,
+    conversations,
+    leads,
+    outreach,
+    products,
+    system,
+    tasks,
+    webhooks,
+)
 from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
 
 readiness = {
@@ -67,6 +79,22 @@ async def lifespan(app: FastAPI):
         logger.info("Task queue initialized")
     except Exception as e:
         logger.error(f"Task queue initialization failed: {e}")
+
+    try:
+        from automation.engine import automation_job_worker
+
+        await automation_job_worker.start()
+        logger.info("Automation job worker initialized")
+    except Exception as e:
+        logger.error(f"Automation job worker initialization failed: {e}")
+
+    try:
+        from automation.delivery import outbound_delivery_worker
+
+        await outbound_delivery_worker.start()
+        logger.info("Outbound delivery worker initialized")
+    except Exception as e:
+        logger.error(f"Outbound delivery worker initialization failed: {e}")
 
     # Initialize browser-harness (optional, non-fatal)
     try:
@@ -109,6 +137,22 @@ async def lifespan(app: FastAPI):
         logger.info("Task queue closed")
     except Exception as e:
         logger.error(f"Task queue cleanup failed: {e}")
+
+    try:
+        from automation.engine import automation_job_worker
+
+        await automation_job_worker.stop()
+        logger.info("Automation job worker closed")
+    except Exception as e:
+        logger.error(f"Automation job worker cleanup failed: {e}")
+
+    try:
+        from automation.delivery import outbound_delivery_worker
+
+        await outbound_delivery_worker.stop()
+        logger.info("Outbound delivery worker closed")
+    except Exception as e:
+        logger.error(f"Outbound delivery worker cleanup failed: {e}")
 
     try:
         from scheduler.task_queue import close_redis_client
@@ -160,6 +204,9 @@ app.include_router(products.router, prefix="/api/products", tags=["products"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
 app.include_router(outreach.router, prefix="/api/outreach", tags=["outreach"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(automations.router, prefix="/api/automations", tags=["automations"])
+app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])
 
 
 @app.get("/")

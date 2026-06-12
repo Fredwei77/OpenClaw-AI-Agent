@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle, RefreshCw, Trash2, Eye } from 'lucide-react';
+import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle, RefreshCw, Trash2, Eye, Workflow } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ReactMarkdown from 'react-markdown';
+import AutomationWorkbench from './features/automations/AutomationWorkbench';
 
 // Use environment variable for backend URL if available, default to localhost:8000
 const API_BASE_URL = import.meta.env?.VITE_API_URL || 'http://127.0.0.1:8000';
@@ -1072,6 +1073,10 @@ function App() {
           <Send size={20} />
           {t.tabMarketing}
         </div>
+        <div className={`nav-link ${activeTab === 'automations' ? 'active' : ''}`} onClick={() => setActiveTab('automations')}>
+          <Workflow size={20} />
+          {lang === 'zh' ? 'AI 获客自动化' : 'Lead Automation'}
+        </div>
         <div className={`nav-link ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>
           <BarChart3 size={20} />
           {t.tabAnalytics}
@@ -1097,6 +1102,7 @@ function App() {
             {activeTab === 'dashboard' ? t.headerDashboard : 
              activeTab === 'leads' ? t.headerLeads :
              activeTab === 'marketing' ? t.tabMarketing :
+             activeTab === 'automations' ? (lang === 'zh' ? 'AI 获客自动化' : 'AI Lead Automation') :
              activeTab === 'plugins' ? t.tabPlugins :
              activeTab === 'analytics' ? t.tabAnalytics :
              activeTab === 'skills' ? t.tabSkills : t.tabSettings}
@@ -2390,6 +2396,10 @@ function App() {
               </div>
             );
           })()}
+
+          {activeTab === 'automations' && (
+            <AutomationWorkbench lang={lang} />
+          )}
 
         </div>
       </main>
