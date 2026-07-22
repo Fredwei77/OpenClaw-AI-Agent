@@ -82,12 +82,45 @@ class XDomainSkill(BaseDomainSkill):
         return await self.hm.click_element('[data-testid$="-follow"]', timeout=5)
 
     async def send_message(self, username: str, message: str) -> bool:
-        await self.hm.navigate(f"https://x.com/messages/compose?recipient={username}")
+        username = username.strip().lstrip("@")
+        if not username or not message.strip():
+            raise ValueError("X handle and message are required")
+
+        await self.hm.navigate(f"https://x.com/{urllib.parse.quote(username, safe='')}")
         await self.hm.wait_for_load()
         await asyncio.sleep(3)
 
-        if not await self.hm.fill_input('[data-testid="dmConversationTextInput"]', message):
-            return False
-        await self.hm.press_key("Enter")
-        await asyncio.sleep(1)
+        page_info = await self.hm.get_page_info()
+        current_url = str((page_info or {}).get("url") or "")
+        if "/login" in current_url or "/i/flow/login" in current_url:
+            raise RuntimeError("X session is not logged in")
+
+        opened = False
+        for selector in (
+            '[data-testid="sendDMFromProfile"]',
+            'a[href*="/messages/compose"]',
+            'button[aria-label*="Message"]',
+        ):
+            if await self.hm.click_element(selector, timeout=3):
+                opened = True
+                break
+        if not opened:
+            raise RuntimeError("X direct-message button was not found; the recipient may not accept DMs")
+
+        input_selector = '[data-testid="dmConversationTextInput"]'
+        if not await self.hm.wait_for_element(input_selector, timeout=10, visible=True):
+            raise RuntimeError("X message composer did not open")
+        if not await self.hm.fill_input(input_selector, message):
+            raise RuntimeError("Could not fill the X message composer")
+
+        if not await self.hm.click_element('[data-testid="dmComposerSendButton"]', timeout=5):
+            raise RuntimeError("X send button was not available")
+        await asyncio.sleep(2)
+
+        submitted = await self.hm.execute_js(
+            "(()=>{const e=document.querySelector('[data-testid=\"dmConversationTextInput\"]');"
+            "return !!e && !(e.innerText||e.textContent||'').trim()})()"
+        )
+        if not submitted:
+            raise RuntimeError("X did not confirm that the message was submitted")
         return True

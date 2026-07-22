@@ -88,6 +88,25 @@ class TestHarnessAgentExecution:
         assert "not connected" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_run_reconnects_harness_before_failing(self):
+        from agents.harness_agent.harness_agent import HarnessAgent
+
+        class RecoveringHM:
+            is_connected = False
+
+            async def start(self):
+                self.is_connected = True
+                return True
+
+        manager = RecoveringHM()
+        result = await HarnessAgent(harness_manager=manager).run(
+            {"action": "unknown", "platform": "x"}
+        )
+
+        assert manager.is_connected is True
+        assert result["message"] == "Unknown action: unknown"
+
+    @pytest.mark.asyncio
     async def test_run_unsupported_platform(self):
         from agents.harness_agent.harness_agent import HarnessAgent
 
@@ -160,16 +179,28 @@ class TestBrowserHarnessManager:
     """Test BrowserHarnessManager initialization."""
 
     def test_manager_init(self):
-        from browser_cluster.manager.browser_harness_manager import BrowserHarnessManager
+        from browser_cluster.manager import browser_harness_manager
+
+        BrowserHarnessManager = browser_harness_manager.BrowserHarnessManager
         manager = BrowserHarnessManager(name="test")
         assert manager.name == "test"
         assert not manager.is_connected
+        assert browser_harness_manager.bh.NAME == "test"
 
     @pytest.mark.asyncio
-    async def test_manager_start_without_daemon(self):
-        from browser_cluster.manager.browser_harness_manager import BrowserHarnessManager
+    async def test_manager_start_without_daemon(self, monkeypatch):
+        import browser_harness.admin
+        from browser_cluster.manager import browser_harness_manager
+
+        monkeypatch.setattr(browser_harness_manager.ipc, "ping", lambda _name: False)
+        monkeypatch.setattr(
+            browser_harness.admin,
+            "ensure_daemon",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("daemon unavailable")),
+        )
+
+        BrowserHarnessManager = browser_harness_manager.BrowserHarnessManager
         manager = BrowserHarnessManager(name="test_nonexistent")
-        # This should fail gracefully since no daemon is running
         result = await manager.start()
-        # Should return False since browser-harness daemon isn't running
-        assert result is False or manager.is_connected is False
+        assert result is False
+        assert manager.is_connected is False

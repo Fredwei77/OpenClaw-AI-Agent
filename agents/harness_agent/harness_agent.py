@@ -67,11 +67,17 @@ class HarnessAgent(BaseAgent):
         message = task.get("message", "")
         limit = task.get("limit", 20)
 
-        # Check harness availability
+        # Recover when Chrome or the daemon became available after backend startup.
+        if self.harness_manager and not self.harness_manager.is_connected:
+            await self.harness_manager.start()
+
         if not self.harness_manager or not self.harness_manager.is_connected:
             return {
                 "status": "error",
-                "message": "Browser harness not connected. Ensure Chrome is running with --remote-debugging-port."
+                "message": (
+                    "Browser harness not connected. Verify browser-harness 0.1.3+ is installed, "
+                    "Chrome is running with --remote-debugging-port=9222, and remote debugging is allowed in Chrome."
+                ),
             }
 
         # Get the domain skill for this platform

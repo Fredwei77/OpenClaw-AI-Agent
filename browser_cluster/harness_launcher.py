@@ -78,7 +78,12 @@ def launch_chrome_with_debugging(
         logger.error("Chrome executable not found. Set CHROME_PATH environment variable.")
         return None
 
-    args = [chrome_exe, f"--remote-debugging-port={port}"]
+    args = [
+        chrome_exe,
+        f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
+        "--remote-allow-origins=*",
+    ]
     if user_data_dir:
         args.append(f"--user-data-dir={user_data_dir}")
 

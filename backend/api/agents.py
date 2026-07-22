@@ -1,20 +1,634 @@
-from fastapi import APIRouter, HTTPException, Depends
+﻿from fastapi import APIRouter, HTTPException, Depends
 import os
 import sys
 import asyncio
+import json
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, Literal
 from openai import AsyncOpenAI
 import traceback
 import re
 from datetime import datetime
+from agents.outreach_standards import (
+    PRIORITY_CUSTOMERS,
+    TARGET_MARKETS,
+    first_specific_signal,
+    initial_email_body,
+    is_disqualified_lead,
+    score_lead,
+    subject_for_signal,
+)
 
 from browser_cluster.manager.browser_pool import get_browser_pool
 from scheduler.task_queue import get_task_queue, TaskPriority
+from backend.email_utils import sanitize_lead_email
 from .auth import get_current_user
 
 router = APIRouter()
 MAX_REASONABLE_FOLLOWERS = 10_000_000_000
+CUSTOMER_RULES_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "config", "customer_development_rules.json"))
+_CUSTOMER_RULES_CACHE: dict[str, Any] | None = None
+EMAIL_PATTERN = re.compile(r"(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b")
+SEARCH_VERIFICATION_MARKERS = (
+    "error-lite@duckduckgo.com",
+    "duckduckgo.com/anomaly",
+    "anomaly.js",
+    "robot",
+    "captcha",
+    "verify you are human",
+    "unusual traffic",
+)
+SOCIAL_RESULT_SKIP_TERMS = {
+    "linkedin",
+    "facebook",
+    "instagram",
+    "twitter",
+    "x.com",
+    "tiktok",
+    "duckduckgo",
+    "google",
+}
+SEARCH_RESULT_SKIP_HOSTS = {
+    "duckduckgo.com",
+    "google.com",
+    "bing.com",
+    "yahoo.com",
+    "yandex.com",
+    "baidu.com",
+    "youtube.com",
+    "amazon.com",
+    "ebay.com",
+    "pinterest.com",
+    "reddit.com",
+    "wikipedia.org",
+}
+PUBLIC_EMAIL_SKIP_HOSTS = {
+    "linkedin.com",
+    "x.com",
+    "twitter.com",
+    "facebook.com",
+    "instagram.com",
+    "tiktok.com",
+    "google.com",
+    "duckduckgo.com",
+}
+SOCIAL_SHORTLINK_HOSTS = {"t.co", "bit.ly", "lnkd.in", "linktr.ee", "bio.link", "beacons.ai"}
+SOCIAL_LOW_VALUE_TERMS = {
+    "fan",
+    "fans",
+    "girls",
+    "girl",
+    "hot",
+    "sexy",
+    "adult",
+    "meme",
+    "memes",
+    "quote",
+    "quotes",
+    "daily",
+    "every day",
+    "community",
+    "club",
+    "blog",
+    "tips",
+    "review",
+    "reviews",
+}
+SOCIAL_BUSINESS_SIGNAL_TERMS = {
+    "manufacturer",
+    "supplier",
+    "factory",
+    "wholesale",
+    "distributor",
+    "exporter",
+    "importer",
+    "brand",
+    "store",
+    "shop",
+    "official",
+    "company",
+    "inc",
+    "ltd",
+    "llc",
+    "apparel",
+    "garment",
+    "clothing",
+    "wear",
+    "lighting",
+    "led",
+    "equipment",
+    "fitness",
+    "yoga wear",
+    "leggings",
+}
+COUNTRY_HINTS = {
+    "United States": (".us", " united states", " usa", " u.s.", " california", " new york", " texas"),
+    "United Kingdom": (".uk", " united kingdom", " london", " england", " scotland"),
+    "Canada": (".ca", " canada", " toronto", " vancouver", " ontario"),
+    "Australia": (".au", " australia", " sydney", " melbourne"),
+    "Germany": (".de", " germany", " deutschland", " berlin"),
+    "France": (".fr", " france", " paris"),
+    "Japan": (".jp", " japan", " tokyo"),
+    "Singapore": (".sg", " singapore"),
+    "China": (".cn", " china", " shenzhen", " guangzhou", " shanghai"),
+}
+FUNDING_PATTERN = re.compile(
+    r"(?i)\b(?:pre-seed|seed|series\s+[a-e]|angel|venture[-\s]?backed|bootstrapped|funded|raised\s+\$?[\d,.]+\s*(?:m|million|b|billion)?)\b"
+)
+EMPLOYEE_PATTERN = re.compile(
+    r"(?i)\b(?:employees?|team size|company size|headcount)\D{0,20}(\d{1,3}(?:,\d{3})?)(?:\s*[-–]\s*(\d{1,3}(?:,\d{3})?))?"
+)
+EMPLOYEE_REVERSE_PATTERN = re.compile(
+    r"(?i)\b(\d{1,3}(?:,\d{3})?)(?:\s*[-–]\s*(\d{1,3}(?:,\d{3})?))?\s+employees?\b"
+)
+FOUNDER_PATTERN = re.compile(
+    r"(?i)\b(?:founder|co-founder|founded by|ceo)\s*(?:[:\-–]|is|was|,)?\s*([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,3})"
+)
+
+
+def _customer_development_rules() -> dict[str, Any]:
+    global _CUSTOMER_RULES_CACHE
+    if _CUSTOMER_RULES_CACHE is not None:
+        return _CUSTOMER_RULES_CACHE
+    try:
+        with open(CUSTOMER_RULES_PATH, "r", encoding="utf-8") as file:
+            _CUSTOMER_RULES_CACHE = json.load(file)
+    except Exception as exc:
+        print(f"[API] Customer rules unavailable: {exc}")
+        _CUSTOMER_RULES_CACHE = {"version": "fallback", "asset_priority": []}
+    return _CUSTOMER_RULES_CACHE
+
+
+def _clean_company_asset_name(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip(" -|•·")
+    if not text:
+        return ""
+    cleanup = (_customer_development_rules().get("company_name_cleanup") or {})
+    for term in cleanup.get("masked_terms") or []:
+        if term and term.casefold() in text.casefold():
+            return ""
+    for pattern in cleanup.get("remove_patterns") or []:
+        try:
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip(" -|•·")
+        except re.error:
+            continue
+    text = re.sub(r"\(@[A-Za-z0-9_]{1,15}\)", "", text).strip(" -|•·")
+    text = re.sub(r"@[A-Za-z0-9_]{1,15}", "", text).strip(" -|•·")
+    text = re.sub(r"\.{2,}|…", "", text).strip(" -|•·")
+    text = re.sub(r"\s+@\w[\w.-]+$", "", text).strip(" -|•·")
+    return text[:120]
+
+
+def _searchable_company_name(lead: dict, keyword: str = "") -> str:
+    metadata = lead.get("metadata") or {}
+    for value in (
+        metadata.get("company_name"),
+        metadata.get("company"),
+        metadata.get("organization"),
+        metadata.get("title"),
+        lead.get("username"),
+    ):
+        company = _clean_company_asset_name(str(value or ""))
+        if company and len(company) >= 2:
+            return company
+    return str(keyword or "").strip()
+
+
+def _tokenize_search_text(text: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]{3,}", str(text or "").casefold())
+    stop = {"official", "website", "contact", "email", "company", "inc", "ltd", "llc", "limited", "the", "and"}
+    deduped: list[str] = []
+    for token in tokens:
+        if token in stop:
+            continue
+        if token not in deduped:
+            deduped.append(token)
+    return deduped[:8]
+
+
+def _is_search_result_host_allowed(url: str) -> bool:
+    host = _host_from_url(url)
+    if not host:
+        return False
+    blocked = SEARCH_RESULT_SKIP_HOSTS | PUBLIC_EMAIL_SKIP_HOSTS
+    return not any(host == item or host.endswith(f".{item}") for item in blocked)
+
+
+def _score_company_site_candidate(url: str, title: str, lead: dict, keyword: str = "") -> int:
+    if not _is_email_lookup_candidate(url) or not _is_search_result_host_allowed(url):
+        return -100
+    host = _host_from_url(url)
+    haystack = f"{host} {title}".casefold()
+    company_tokens = _tokenize_search_text(_searchable_company_name(lead, keyword))
+    keyword_tokens = _tokenize_search_text(keyword)
+    score = 0
+    if any(token in host for token in company_tokens):
+        score += 6
+    score += sum(2 for token in company_tokens if token in haystack)
+    score += sum(1 for token in keyword_tokens if token in haystack)
+    if re.search(r"/(?:contact|about|company|home)(?:[/#?]|$)", url, re.IGNORECASE):
+        score += 1
+    if len(host.split(".")) <= 3:
+        score += 1
+    if any(term in host for term in SOCIAL_RESULT_SKIP_TERMS):
+        score -= 8
+    return score
+
+
+def _urls_from_text(text: str) -> list[str]:
+    urls: list[str] = []
+    for match in re.findall(r"(?i)\b(?:https?://)?(?:www\.)?[a-z0-9][a-z0-9.-]+\.[a-z]{2,}(?:/[^\s<>'\"]*)?", str(text or "")):
+        url = match.strip(".,;)：:，。")
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        if _is_email_lookup_candidate(url) and _is_search_result_host_allowed(url) and url not in urls:
+            urls.append(url)
+    return urls[:5]
+
+
+def _candidate_url_from_social_anchor(href: str, text: str) -> str:
+    href = str(href or "").strip()
+    text = str(text or "").strip()
+    host = _host_from_url(href)
+    if host in {"x.com", "twitter.com"} and "/i/redirect" in href:
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        target = parse_qs(urlparse(href).query).get("url", [""])[0]
+        target = unquote(target)
+        if _is_email_lookup_candidate(target) and _is_search_result_host_allowed(target):
+            return target
+    if host in SOCIAL_SHORTLINK_HOSTS or host.endswith(".t.co"):
+        for url in _urls_from_text(text):
+            if _is_email_lookup_candidate(url):
+                return url
+        return ""
+    if href and _is_email_lookup_candidate(href) and _is_search_result_host_allowed(href):
+        return href
+    return ""
+
+
+def _social_profile_url(lead: dict) -> str:
+    profile_url = str(lead.get("profile_url") or "").strip()
+    if profile_url and profile_url.startswith(("http://", "https://")):
+        return profile_url
+    platform = str(lead.get("platform") or "").casefold()
+    username = str(lead.get("username") or "")
+    handle_match = re.search(r"@([A-Za-z0-9_]{1,15})", username)
+    if platform in {"x", "twitter"} and handle_match:
+        return f"https://x.com/{handle_match.group(1)}"
+    if profile_url and profile_url.startswith(("x.com/", "twitter.com/", "linkedin.com/", "www.linkedin.com/")):
+        return f"https://{profile_url}"
+    return ""
+
+
+def _is_social_profile_lead(lead: dict) -> bool:
+    platform = str(lead.get("platform") or "").casefold()
+    if platform in {"x", "twitter", "linkedin", "facebook", "instagram", "tiktok"}:
+        return True
+    url = _social_profile_url(lead).casefold()
+    return any(domain in url for domain in ("x.com/", "twitter.com/", "linkedin.com/", "facebook.com/", "instagram.com/", "tiktok.com/"))
+
+
+def _has_social_business_signal(text: str, keyword: str = "") -> bool:
+    haystack = f" {text or ''} {keyword or ''} ".casefold()
+    return any(term in haystack for term in SOCIAL_BUSINESS_SIGNAL_TERMS)
+
+
+def _is_low_value_social_lead(lead: dict, keyword: str = "") -> bool:
+    """Filter social accounts that are unlikely to become B2B customer assets."""
+    if not _is_social_profile_lead(lead):
+        return False
+    metadata = lead.get("metadata") or {}
+    text = " ".join(
+        str(value or "")
+        for value in (
+            lead.get("username"),
+            lead.get("profile_url"),
+            " ".join(lead.get("tags") or []),
+            metadata.get("summary"),
+            metadata.get("title"),
+            metadata.get("company_name"),
+        )
+    ).casefold()
+    if _asset_value(lead, "website", "linkedin_url", "email", "contact_email"):
+        return False
+    if _has_social_business_signal(text, keyword):
+        return False
+    return any(term in text for term in SOCIAL_LOW_VALUE_TERMS)
+
+
+def _matches_keyword_intent(text: str, keyword: str) -> bool:
+    """Reject social handles that only contain a keyword as part of another word."""
+    terms = re.findall(r"[a-z0-9]{3,}", str(keyword or "").casefold())
+    if not terms:
+        return True
+    haystack = str(text or "").casefold()
+    return all(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", haystack) for term in terms)
+
+
+def _is_empty_social_asset_lead(lead: dict, keyword: str = "") -> bool:
+    """Return true when a social result has no usable company asset fields."""
+    if not _is_social_profile_lead(lead):
+        return False
+    metadata = lead.get("metadata") or {}
+    if lead.get("email") or metadata.get("email") or metadata.get("contact_email"):
+        return False
+    if metadata.get("website") or metadata.get("linkedin_url"):
+        return False
+    platform = str(lead.get("platform") or "").casefold()
+    profile_url = str(lead.get("profile_url") or "").casefold()
+    if platform == "linkedin" and "linkedin.com/" in profile_url:
+        return False
+    return True
+
+
+def _asset_value(lead: dict, *keys: str) -> str:
+    metadata = lead.get("metadata") or {}
+    for key in keys:
+        value = metadata.get(key)
+        if value:
+            return str(value).strip()
+    return ""
+
+
+def _asset_field_status(lead: dict) -> dict[str, str]:
+    metadata = lead.get("metadata") or {}
+    fields = {
+        "company_name": bool(_asset_value(lead, "company_name", "company", "organization", "title") or lead.get("username")),
+        "website": bool(_asset_value(lead, "website", "official_website", "homepage", "company_website")),
+        "founder": bool(_asset_value(lead, "founder", "founders", "owner", "ceo")),
+        "linkedin_url": bool(_asset_value(lead, "linkedin_url", "linkedin", "linkedin_company_url") or "linkedin.com" in str(lead.get("profile_url") or "")),
+        "email": bool(lead.get("email") or metadata.get("email") or metadata.get("contact_email")),
+        "funding": bool(_asset_value(lead, "funding", "funding_status", "funding_round", "financing")),
+        "employee_size": bool(_asset_value(lead, "employee_size", "employees", "employee_count", "company_size", "headcount")),
+        "country": bool(_asset_value(lead, "country", "country_code", "location_country", "geography", "location")),
+    }
+    return {field: ("verified" if present else "missing") for field, present in fields.items()}
+
+
+def _asset_presence_counts(leads: list[dict]) -> dict[str, int]:
+    fields = ("website", "linkedin_url", "email", "country", "employee_size", "founder", "funding")
+    counts = {field: 0 for field in fields}
+    for lead in leads:
+        metadata = lead.get("metadata") or {}
+        if metadata.get("website"):
+            counts["website"] += 1
+        if metadata.get("linkedin_url") or "linkedin.com" in str(lead.get("profile_url") or ""):
+            counts["linkedin_url"] += 1
+        if lead.get("email") or metadata.get("email") or metadata.get("contact_email"):
+            counts["email"] += 1
+        for field in ("country", "employee_size", "founder", "funding"):
+            if metadata.get(field):
+                counts[field] += 1
+    return counts
+
+
+def _asset_debug_summary(leads: list[dict], keyword: str = "") -> dict[str, Any]:
+    no_company = 0
+    social_profiles = 0
+    website_ready = 0
+    samples = []
+    for lead in leads:
+        metadata = lead.get("metadata") or {}
+        company = _searchable_company_name(lead, keyword)
+        if not company:
+            no_company += 1
+        if _is_social_profile_lead(lead):
+            social_profiles += 1
+        if metadata.get("website"):
+            website_ready += 1
+        if len(samples) < 5:
+            samples.append({
+                "id": lead.get("id"),
+                "company": company,
+                "profile_url": lead.get("profile_url") or _social_profile_url(lead),
+                "website": metadata.get("website"),
+                "linkedin_url": metadata.get("linkedin_url"),
+                "email": lead.get("email") or metadata.get("email"),
+            })
+    return {
+        "keyword": keyword,
+        "no_company_name": no_company,
+        "social_profiles": social_profiles,
+        "website_ready": website_ready,
+        "samples": samples,
+    }
+
+
+def _asset_next_action(lead: dict, score: dict[str, Any]) -> str:
+    metadata = lead.get("metadata") or {}
+    status = metadata.get("asset_status") or _asset_field_status(lead)
+    if score.get("tier") == "C" or metadata.get("disqualified"):
+        return "abandon_or_low_frequency_nurture"
+    if status.get("website") == "missing":
+        return "find_official_website"
+    if status.get("email") == "missing":
+        return "find_public_business_email"
+    if score.get("tier") in {"S", "A"}:
+        return "start_personalized_outreach"
+    return "monitor_until_project_signal"
+
+
+def _apply_customer_development_rules(lead: dict) -> None:
+    metadata = lead.get("metadata") or {}
+    company = _clean_company_asset_name(
+        metadata.get("company_name")
+        or metadata.get("company")
+        or metadata.get("organization")
+        or metadata.get("title")
+        or lead.get("username")
+        or ""
+    )
+    if company:
+        metadata["company_name"] = company
+    if lead.get("email"):
+        metadata.setdefault("email", lead["email"])
+    scoring = score_lead(lead, metadata)
+    metadata["rules_version"] = _customer_development_rules().get("version", "fallback")
+    metadata["asset_status"] = _asset_field_status({**lead, "metadata": metadata})
+    metadata["quality_score"] = scoring.get("score", 0)
+    metadata["tier"] = scoring.get("tier", "C")
+    metadata["score_breakdown"] = scoring.get("breakdown", {})
+    metadata["disqualified"] = bool(is_disqualified_lead(lead, metadata))
+    metadata["next_action"] = _asset_next_action({**lead, "metadata": metadata}, scoring)
+    lead["metadata"] = metadata
+
+
+def _extract_public_emails(text: str) -> list[str]:
+    """Extract likely public business emails from visible text or HTML."""
+    if not text:
+        return []
+    normalized = (
+        text.replace("[at]", "@")
+        .replace("(at)", "@")
+        .replace(" at ", "@")
+        .replace("[dot]", ".")
+        .replace("(dot)", ".")
+        .replace(" dot ", ".")
+    )
+    normalized = re.sub(r"\s*@\s*", "@", normalized)
+    normalized = re.sub(r"\s*\.\s*", ".", normalized)
+    emails = []
+    for match in EMAIL_PATTERN.findall(normalized):
+        email = match.strip(" .,:;<>[](){}'\"").lower()
+        local, _, domain = email.partition("@")
+        if not local or not domain:
+            continue
+        if domain.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+            continue
+        if domain in {"example.com", "test.com", "email.com"}:
+            continue
+        email = sanitize_lead_email(email)
+        if not email:
+            continue
+        if email not in emails:
+            emails.append(email)
+    return emails[:5]
+
+
+def _first_public_email(text: str) -> str | None:
+    emails = _extract_public_emails(text)
+    return emails[0] if emails else None
+
+
+def _is_email_lookup_candidate(url: str) -> bool:
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = urlparse(url).netloc.lower().split(":", 1)[0].removeprefix("www.")
+    except Exception:
+        return False
+    return not any(host == item or host.endswith(f".{item}") for item in PUBLIC_EMAIL_SKIP_HOSTS)
+
+
+def _clean_search_result_url(href: str) -> str:
+    """Resolve common search redirect URLs into their target URL."""
+    if not href:
+        return ""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    if "/l/?" in href or "duckduckgo.com/l/" in href:
+        target = parse_qs(urlparse(href).query).get("uddg", [""])[0]
+        if target:
+            return unquote(target)
+    return href
+
+
+def _host_from_url(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).netloc.lower().split(":", 1)[0].removeprefix("www.")
+    except Exception:
+        return ""
+
+
+def _is_social_url(url: str) -> bool:
+    host = _host_from_url(url)
+    return any(host == item or host.endswith(f".{item}") for item in PUBLIC_EMAIL_SKIP_HOSTS)
+
+
+def _clean_company_title(title: str, host: str = "") -> str:
+    title = re.sub(r"\s+", " ", str(title or "")).strip(" -|•·")
+    if not title:
+        return ""
+    for separator in (" | ", " - ", " – ", " — ", " :: "):
+        if separator in title:
+            title = title.split(separator, 1)[0].strip()
+            break
+    if host:
+        root = host.split(".")[0].replace("-", " ")
+        if title.casefold() in {"home", "homepage", "official website"}:
+            title = root.title()
+    return title[:120]
+
+
+def _infer_country(url: str = "", text: str = "") -> str:
+    host = _host_from_url(url)
+    haystack = f" {host} {text or ''}".casefold()
+    for country, hints in COUNTRY_HINTS.items():
+        if any(hint in haystack for hint in hints):
+            return country
+    return ""
+
+
+def _extract_asset_metadata(text: str, url: str = "", title: str = "") -> dict[str, str]:
+    """Extract lightweight company asset fields from public search/page text."""
+    metadata: dict[str, str] = {}
+    text = re.sub(r"\s+", " ", text or "").strip()
+    host = _host_from_url(url)
+    cleaned_title = _clean_company_title(title, host)
+    if cleaned_title:
+        metadata["company_name"] = cleaned_title
+        metadata["title"] = cleaned_title
+    if url and not _is_social_url(url):
+        metadata["website"] = url
+        if host:
+            metadata["domain"] = host
+    if "linkedin.com" in (url or ""):
+        metadata["linkedin_url"] = url
+    linkedin_match = re.search(r"https?://(?:www\.)?linkedin\.com/(?:company|in)/[^\s\"'<>]+", text, re.IGNORECASE)
+    if linkedin_match:
+        metadata["linkedin_url"] = linkedin_match.group(0).rstrip(").,")
+    country = _infer_country(url, text)
+    if country:
+        metadata["country"] = country
+    employee_match = EMPLOYEE_PATTERN.search(text) or EMPLOYEE_REVERSE_PATTERN.search(text)
+    if employee_match:
+        metadata["employee_size"] = (
+            f"{employee_match.group(1)}-{employee_match.group(2)}"
+            if employee_match.group(2)
+            else employee_match.group(1)
+        )
+    funding_match = FUNDING_PATTERN.search(text)
+    if funding_match:
+        metadata["funding"] = funding_match.group(0).strip()
+    founder_match = FOUNDER_PATTERN.search(text)
+    if founder_match:
+        metadata["founder"] = founder_match.group(1).strip(" .,;:-")
+    return metadata
+
+
+def _merge_metadata(lead: dict, metadata: dict[str, str]) -> None:
+    if not metadata:
+        return
+    current = lead.get("metadata") or {}
+    for key, value in metadata.items():
+        if value and not current.get(key):
+            current[key] = value
+    lead["metadata"] = current
+
+
+def _is_search_verification_page(text: str) -> bool:
+    """Detect search-engine bot checks/error pages so their support emails are not captured."""
+    if not text:
+        return False
+    lowered = text.casefold()
+    return any(marker in lowered for marker in SEARCH_VERIFICATION_MARKERS)
+
+
+def _lead_email_discovery_query(lead: dict, keyword: str = "") -> str:
+    """Build a public web search query for discovering a company's contact page."""
+    parts: list[str] = []
+    username = str(lead.get("username") or "").strip()
+    if username:
+        username = re.sub(r"\([^)]*@[^)]*\)", "", username)
+        username = re.sub(r"[@|•·]+", " ", username)
+        username = re.sub(r"\s+", " ", username).strip()
+        if username:
+            parts.append(f'"{username[:80]}"')
+    metadata = lead.get("metadata") or {}
+    title = str(metadata.get("title") or metadata.get("summary") or "").strip()
+    if title and len(title) <= 120:
+        parts.append(title)
+    if keyword:
+        parts.append(keyword)
+    parts.append("contact email")
+    return " ".join(parts)
 
 
 def _parse_social_count(text: str) -> int:
@@ -124,6 +738,13 @@ class ScrapeRequest(BaseModel):
     max_results: int = 50  # 最大结果数量
 
 
+class AssetEnrichmentRequest(BaseModel):
+    lead_ids: list[int] = Field(default_factory=list, max_length=100)
+    keyword: str = ""
+    platform: str = "all"
+    limit: int = Field(default=25, ge=1, le=100)
+
+
 class TaskSubmitRequest(BaseModel):
     agent_name: str
     task_type: str
@@ -142,6 +763,27 @@ class MarketingPipelineRequest(BaseModel):
     language: str = "en"
 
 
+class AcquisitionPlatform(BaseModel):
+    platform: Literal[
+        "x", "twitter", "linkedin", "instagram", "facebook", "tiktok",
+        "shopify", "google", "duckduckgo", "directory",
+    ]
+    priority: int = Field(default=1, ge=0, le=3)
+
+
+class AcquisitionPipelineRequest(BaseModel):
+    keyword: str = Field(..., min_length=1, max_length=255)
+    platforms: list[AcquisitionPlatform] = Field(..., min_length=1, max_length=10)
+    max_results_per_platform: int = Field(default=25, ge=1, le=200)
+    max_outreach_leads: int = Field(default=20, ge=1, le=20)
+    product_context: str = Field(default="", max_length=2000)
+
+
+def _ordered_acquisition_platforms(platforms: list[AcquisitionPlatform]) -> list[AcquisitionPlatform]:
+    """Run higher priorities first while preserving request order for ties."""
+    return sorted(platforms, key=lambda item: -item.priority)
+
+
 class MarketingActionRequest(BaseModel):
     action: Literal["email", "classify", "social"]
     lead_ids: list[int] = Field(..., min_length=1, max_length=10)
@@ -157,10 +799,19 @@ def _is_usable_marketing_text(text: str, language: str = "en") -> bool:
         return False
     if re.search(r"[A-Za-z]{36,}", text):
         return False
+    if language == "en" and _contains_non_english_script(text):
+        return False
     foreign_script_chars = re.findall(r"[\u0400-\u052f\u0590-\u05ff\u0600-\u06ff]", text)
     if len(foreign_script_chars) > 3:
         return False
     return True
+
+
+def _contains_non_english_script(text: str) -> bool:
+    """Detect scripts that should not appear in English outreach copy."""
+    if not text:
+        return False
+    return bool(re.search(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
 
 
 def _lead_summary(lead: dict) -> str:
@@ -174,6 +825,47 @@ def _lead_summary(lead: dict) -> str:
 
 def _fallback_marketing_action(action: str, leads: list[dict], product_context: str, language: str) -> str:
     lead = leads[0]
+    scoring_lines = []
+    for item in leads:
+        scoring = score_lead(item)
+        scoring_lines.append(
+            f"- **{item.get('username', 'Unknown lead')}**: {scoring['score']}/10, tier {scoring['tier']}. "
+            f"Breakdown: {scoring['breakdown']}. "
+            f"Next step: {'abandon; do not develop' if scoring['tier'] == 'C' else 'ask about lead time or available stock after confirming project fit'}."
+        )
+    if action == "classify":
+        heading = "## 潜在客户评分" if language == "zh" else "## Lead Scoring"
+        return heading + "\n\n" + "\n".join(scoring_lines)
+
+    scoring = score_lead(lead)
+    if scoring["tier"] == "C":
+        return "## Lead skipped\n\nThis lead is C-tier under scoring_rules.md or disqualified by target_market.md. Do not develop."
+
+    username_clean = str(lead.get("username") or "there").strip().lstrip("@")
+    research = {
+        "industry": product_context.strip() or "current project",
+        "interests": [product_context.strip() or "current project"],
+    }
+    signal = first_specific_signal(lead, research)
+    if action == "email":
+        return f"""## Personalized Cold Email
+
+**Subject:** {subject_for_signal(signal)}
+
+{initial_email_body(lead, research, product_context)}
+"""
+
+    return f"""## Social Outreach
+
+**LinkedIn DM**
+Hi {username_clean}, I saw your work on {signal}. Before discussing price, should I check lead time or available stock for your current project?
+
+**X / Twitter DM**
+Hi {username_clean}, I saw your work on {signal}. Should I check lead time or available stock for your current project?
+
+**Follow-up SOP**
+Day 3: follow up once. Day 7: send a relevant case only if available from supplied materials. Day 14: ask project progress. After 30 days without reply: downgrade to C.
+"""
     username = lead.get("username") or "您好"
     niche = product_context.strip() or ((lead.get("tags") or ["跨境电商"])[0])
     if language == "zh":
@@ -243,15 +935,20 @@ Keep the first message brief. If there is no reply after three days, follow up w
 
 def _marketing_action_prompt(action: str, leads: list[dict], product_context: str, language: str) -> tuple[str, str]:
     action_guidance = {
-        "email": "Write one personalized cold email with a subject line, concise body, and one low-friction CTA.",
-        "classify": "Score each lead from 0-100, assign High/Medium/Nurture intent, explain the evidence, and recommend the next action.",
-        "social": "Write one LinkedIn DM, one X/Twitter DM under 240 characters, and one practical follow-up suggestion.",
+        "email": "Write one personalized cold email with a subject line, concise body, and a CTA about lead time or available stock.",
+        "classify": "Score each lead from 0-10 using scoring_rules.md, assign S/A/B/C, explain the evidence, and recommend abandon for C-tier leads.",
+        "social": "Write one LinkedIn DM, one X/Twitter DM under 240 characters, and the follow-up SOP.",
     }[action]
     language_rule = "Write in Simplified Chinese." if language == "zh" else "Write in English."
     system = (
         "You are a senior B2B growth marketer for cross-border e-commerce. "
-        "Produce concise, specific, ready-to-use copy. Never invent names, companies, referrals, events, or private facts. "
-        "Use only the supplied lead data. Avoid hype, placeholders, and generic filler. "
+        "Use only these five files as the business standard: product_brief.md says main product is '用户填写' and core advantage is '用户填写'; "
+        "target_market.md targets Europe and North America, prioritizes engineering distributors, lighting contractors, renovation companies, and forbids retailers, trading middlemen, and price-only contacts; "
+        "scoring_rules.md uses S=8-10, A=5-7, B=3-4, C=<3 abandon; "
+        "email_style.md requires a direct professional tone, first sentence mentioning the customer's specific project or product, no upfront quote, an ending about lead time or available stock, and never 'hope this email finds you well'; "
+        "follow_up_sop.md requires day 3 follow-up, day 7 case, day 14 project progress, and C downgrade after 30 days without reply. "
+        "Produce concise, specific, ready-to-use copy. Never invent names, companies, referrals, events, private facts, products, prices, cases, or capabilities. "
+        "Use only the supplied lead data. Avoid hype, placeholders, and generic filler. Do not develop C-tier or disqualified leads. "
         f"{language_rule} Return clean Markdown only."
     )
     user = f"""Task: {action_guidance}
@@ -662,8 +1359,9 @@ async def _scrape_twitter(page, keyword: str) -> list:
     leads = []
     encoded_keyword = urllib.parse.quote(keyword)
 
-    # 使用更精确的搜索语法：只搜索账号
-    url = f"https://x.com/search?q=%40{encoded_keyword}&src=typed_query&f=user"
+    # Search user accounts by the keyword. Prefixing "@" only works for exact handles
+    # and makes normal niche keywords like "led light" return poor or empty results.
+    url = f"https://x.com/search?q={encoded_keyword}&src=typed_query&f=user"
     await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
     # 等待页面加载
@@ -681,9 +1379,9 @@ async def _scrape_twitter(page, keyword: str) -> list:
         await asyncio.sleep(1)
 
     # Wait for user cells with retry
-    for attempt in range(3):
+    for attempt in range(2):
         try:
-            await page.wait_for_selector('[data-testid="UserCell"]', timeout=10000)
+            await page.wait_for_selector('[data-testid="UserCell"]', timeout=6000)
             break
         except Exception:
             # Try scrolling to load more content
@@ -739,14 +1437,28 @@ async def _scrape_twitter(page, keyword: str) -> list:
                             followers = parsed_followers
                             break
 
-                    leads.append({
+                    source_text = " ".join(text_contents[:12])
+                    if not _matches_keyword_intent(source_text, keyword):
+                        print(f"[API] Twitter: skipped irrelevant profile @{clean_handle}, keyword={keyword!r}")
+                        continue
+                    metadata = _extract_asset_metadata(source_text, profile_url, name)
+                    if source_text:
+                        metadata["summary"] = source_text[:500]
+                        metadata["source_evidence"] = source_text[:500]
+                    metadata["lead_source"] = "x_people_search"
+                    candidate = {
                         "platform": "x",
                         "username": f"{name} ({handle})" if name else handle,
                         "profile_url": profile_url,
                         "email": None,
                         "followers": followers,
-                        "tags": [keyword]
-                    })
+                        "tags": [keyword],
+                        "metadata": metadata,
+                    }
+                    if _is_low_value_social_lead(candidate, keyword):
+                        print(f"[API] Twitter: skipped low-value social profile @{clean_handle}, name={name}")
+                        continue
+                    leads.append(candidate)
                     print(f"[API] Twitter: extracted @{clean_handle}, name={name}, followers={followers}")
         except Exception as e:
             print(f"[API] Twitter parse error: {e}")
@@ -759,6 +1471,7 @@ async def _scrape_linkedin(page, keyword: str) -> list:
     """Scrape LinkedIn for user profiles matching keyword"""
     import urllib.parse
     leads = []
+    seen_urls = set()
 
     # LinkedIn search URL
     encoded_keyword = urllib.parse.quote(keyword)
@@ -769,10 +1482,18 @@ async def _scrape_linkedin(page, keyword: str) -> list:
     # Wait and check for login wall
     await asyncio.sleep(3)
 
-    # Check if redirected to login
-    if "login" in page.url or " checkpoint" in page.url.lower():
-        print("[API] LinkedIn requires login")
+    # Check if redirected to login or checkpoint
+    if "login" in page.url.lower() or "checkpoint" in page.url.lower():
+        print(f"[API] LinkedIn requires login/checkpoint, url={page.url}")
         return []
+
+    # Current LinkedIn UI lazy-loads search rows; scroll before extraction.
+    for _ in range(3):
+        try:
+            await page.evaluate("window.scrollBy(0, 900)")
+            await asyncio.sleep(1)
+        except Exception:
+            break
 
     # Try multiple selectors for LinkedIn search results
     selectors = [
@@ -789,7 +1510,7 @@ async def _scrape_linkedin(page, keyword: str) -> list:
             print(f"[API] LinkedIn: found {len(user_cards)} cards with selector {selector}")
             break
 
-    for card in user_cards[:15]:
+    for card in user_cards[:30]:
         try:
             # Extract name - multiple selectors
             name = ""
@@ -817,22 +1538,153 @@ async def _scrape_linkedin(page, keyword: str) -> list:
 
             if profile_url and not profile_url.startswith('http'):
                 profile_url = 'https://www.linkedin.com' + profile_url
+            if profile_url:
+                profile_url = profile_url.split("?", 1)[0].rstrip("/")
+            if profile_url in seen_urls:
+                continue
 
             if name:
+                seen_urls.add(profile_url)
+                card_text = await card.text_content() or ""
+                metadata = _extract_asset_metadata(card_text, profile_url, name.strip())
+                if title and not metadata.get("title"):
+                    metadata["title"] = title.strip()
                 leads.append({
                     "platform": "linkedin",
                     "username": name.strip(),
                     "profile_url": profile_url,
-                    "email": None,
+                    "email": _first_public_email(card_text),
                     "followers": 0,
                     "tags": [keyword],
-                    "metadata": {
-                        "title": title.strip() if title else None
-                    }
+                    "metadata": metadata
                 })
         except Exception as e:
             print(f"[API] LinkedIn parse error: {e}")
             continue
+
+    if leads:
+        print(f"[API] LinkedIn: extracted {len(leads)} leads from card selectors")
+        return leads
+
+    # Fallback for newer localized LinkedIn markup: result cards may not expose stable
+    # class names, but profile links remain anchored under /in/.
+    profile_links = await page.query_selector_all('a[href*="/in/"]')
+    print(f"[API] LinkedIn: card selectors empty, found {len(profile_links)} profile links")
+    for link in profile_links[:80]:
+        try:
+            href = await link.get_attribute("href")
+            if not href:
+                continue
+            profile_url = href if href.startswith("http") else f"https://www.linkedin.com{href}"
+            profile_url = profile_url.split("?", 1)[0].rstrip("/")
+            if "/in/" not in profile_url or profile_url in seen_urls:
+                continue
+
+            link_text = (await link.text_content() or "").strip()
+            card_text = await link.evaluate(
+                """el => {
+                    const card = el.closest('li') || el.closest('[data-view-name]') || el.closest('div');
+                    return (card && card.innerText) || el.innerText || '';
+                }"""
+            )
+            lines = [line.strip() for line in re.split(r"[\r\n]+", card_text or "") if line.strip()]
+            name = link_text or (lines[0] if lines else "")
+            name = re.split(r"\s+•\s+", name, 1)[0].strip()
+            if not name or name.casefold() in {"linkedin", "查看资料", "view profile"}:
+                continue
+
+            title = ""
+            if lines:
+                for line in lines[1:5]:
+                    if line and not any(skip in line for skip in ("加为好友", "关注", "Connect", "Follow")):
+                        title = line
+                        break
+
+            metadata = _extract_asset_metadata(card_text or "", profile_url, name)
+            if title and not metadata.get("title"):
+                metadata["title"] = title
+            seen_urls.add(profile_url)
+            leads.append({
+                "platform": "linkedin",
+                "username": name,
+                "profile_url": profile_url,
+                "email": _first_public_email(card_text or ""),
+                "followers": 0,
+                "tags": [keyword, "linkedin"],
+                "metadata": metadata,
+            })
+        except Exception as e:
+            print(f"[API] LinkedIn link fallback parse error: {e}")
+            continue
+
+    # Some LinkedIn results are privacy-masked as "LinkedIn Member/领英会员" and
+    # do not expose /in/ links, but their result rows still contain useful
+    # headline, company, and country data.
+    result_texts = await page.evaluate(
+        """() => Array.from(document.querySelectorAll('main [role="listitem"]'))
+            .map(el => el.innerText || el.textContent || '')
+            .filter(Boolean)"""
+    )
+    print(f"[API] LinkedIn: found {len(result_texts)} list item texts for text fallback")
+    seen_names = {str(lead.get("username") or "").casefold() for lead in leads}
+    for item_text in result_texts[:30]:
+        try:
+            item_text = str(item_text or "").strip()
+            lines = [line.strip() for line in re.split(r"[\r\n]+", item_text) if line.strip()]
+            if len(lines) < 2:
+                continue
+            if any(marker in item_text for marker in ("这些结果有用吗", "您的反馈", "下一步", "Previous", "Next")):
+                continue
+            lowered_item_text = item_text.casefold()
+            search_terms = [term for term in re.split(r"\s+", keyword.casefold()) if term]
+            if search_terms and not any(term in lowered_item_text for term in search_terms):
+                continue
+
+            first_line = lines[0]
+            is_masked_member = first_line in {"领英会员", "LinkedIn Member"}
+            if is_masked_member and len(lines) > 1:
+                headline = lines[1]
+                username = f"{first_line} - {headline[:80]}"
+            else:
+                username = re.split(r"\s+•\s+", first_line, 1)[0].strip()
+                headline = lines[1] if len(lines) > 1 else ""
+            if not username or username.casefold() in seen_names:
+                continue
+
+            company = ""
+            country = ""
+            for line in lines:
+                if line.startswith("目前就职:") or line.startswith("Current:"):
+                    company_part = re.sub(r"^(目前就职:|Current:)\s*", "", line).strip()
+                    company = company_part.split(" - ", 1)[0].strip()
+                if line.startswith("中国") or line in {"United States", "United Kingdom", "Canada", "Australia", "Germany", "France", "Japan", "Singapore"}:
+                    country = line
+
+            metadata = _extract_asset_metadata(item_text, "", username)
+            if is_masked_member:
+                metadata["title"] = headline
+                metadata["company_name"] = company or headline
+            elif headline and not metadata.get("title"):
+                metadata["title"] = headline
+            if company and not metadata.get("company"):
+                metadata["company"] = company
+            if country and not metadata.get("country"):
+                metadata["country"] = country
+            seen_names.add(username.casefold())
+            leads.append({
+                "platform": "linkedin",
+                "username": username,
+                "profile_url": "",
+                "email": _first_public_email(item_text),
+                "followers": 0,
+                "tags": [keyword, "linkedin", "linkedin_text_result"],
+                "metadata": metadata,
+            })
+        except Exception as e:
+            print(f"[API] LinkedIn text fallback parse error: {e}")
+            continue
+
+    print(f"[API] LinkedIn: extracted {len(leads)} leads via fallbacks")
 
     return leads
 
@@ -999,7 +1851,7 @@ async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
 
     # Google search URL
     encoded_keyword = urllib.parse.quote(keyword)
-    url = f"https://www.google.com/search?q={encoded_keyword}+{urllib.parse.quote(suffix)}&num=20" if suffix else f"https://www.google.com/search?q={encoded_keyword}&num=20"
+    url = f"https://www.google.com/search?q={encoded_keyword}+{urllib.parse.quote(suffix)}&num=30" if suffix else f"https://www.google.com/search?q={encoded_keyword}&num=30"
 
     print(f"[API] Google: navigating to {url}")
     try:
@@ -1036,7 +1888,7 @@ async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
             # Fallback: get all h3 elements (each is a search result title)
             h3s = await page.query_selector_all('h3')
             print(f"[API] Google: fallback found {len(h3s)} h3 elements")
-            for h3 in h3s[:15]:
+            for h3 in h3s[:30]:
                 try:
                     title = await h3.text_content()
                     # Walk up to find the parent <a> tag
@@ -1045,20 +1897,22 @@ async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
                         href = await link_el.get_attribute('href')
                         if title and href and href.startswith('http'):
                             domain = urlparse(href).netloc
+                            snippet = await h3.evaluate('el => el.closest("div")?.innerText || el.innerText || ""')
                             leads.append({
                                 "platform": "google",
                                 "username": title.strip(),
                                 "profile_url": href,
-                                "email": None,
+                                "email": _first_public_email(snippet or ""),
                                 "followers": 0,
-                                "tags": [keyword, domain]
+                                "tags": [keyword, domain],
+                                "metadata": _extract_asset_metadata(snippet or "", href, title.strip()),
                             })
                 except Exception:
                     continue
             print(f"[API] Google: extracted {len(leads)} results via h3 fallback")
             return leads
 
-        for result in results[:15]:
+        for result in results[:30]:
             try:
                 title_el = await result.query_selector('h3')
                 link_el = await result.query_selector('a')
@@ -1068,14 +1922,16 @@ async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
 
                 if title and href and href.startswith('http'):
                     domain = urlparse(href).netloc
+                    snippet = await result.text_content()
 
                     leads.append({
                         "platform": "google",
                         "username": title.strip(),
                         "profile_url": href,
-                        "email": None,
+                        "email": _first_public_email(snippet or ""),
                         "followers": 0,
-                        "tags": [keyword, domain]
+                        "tags": [keyword, domain],
+                        "metadata": _extract_asset_metadata(snippet or "", href, title.strip()),
                     })
             except Exception:
                 continue
@@ -1086,6 +1942,25 @@ async def _scrape_google(page, keyword: str, suffix: str = "company") -> list:
         print(f"[API] Google: error: {e}")
 
     return leads
+
+
+def _social_platform_from_url(url: str) -> str:
+    """Recover the requested social platform from a search-result URL."""
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc.lower().split(":", 1)[0].removeprefix("www.")
+    domains = {
+        "linkedin.com": "linkedin",
+        "x.com": "x",
+        "twitter.com": "x",
+        "facebook.com": "facebook",
+        "instagram.com": "instagram",
+        "tiktok.com": "tiktok",
+    }
+    for domain, platform in domains.items():
+        if host == domain or host.endswith(f".{domain}"):
+            return platform
+    return "duckduckgo"
 
 
 async def _scrape_duckduckgo(page, keyword: str) -> list:
@@ -1103,6 +1978,10 @@ async def _scrape_duckduckgo(page, keyword: str) -> list:
         print(f"[API] DuckDuckGo: response status = {response.status}, url = {page.url}")
 
         await asyncio.sleep(2)
+        page_text = await page.content()
+        if _is_search_verification_page(page_text):
+            print("[API] DuckDuckGo: verification page detected; skipping search results")
+            return []
 
         # DuckDuckGo HTML version has simple structure
         results = await page.query_selector_all('.result')
@@ -1114,7 +1993,7 @@ async def _scrape_duckduckgo(page, keyword: str) -> list:
 
         print(f"[API] DuckDuckGo: found {len(results)} result elements")
 
-        for result in results[:15]:
+        for result in results[:30]:
             try:
                 # Try to get title and link
                 link_el = await result.query_selector('a.result__a, a.result__url, a')
@@ -1136,13 +2015,15 @@ async def _scrape_duckduckgo(page, keyword: str) -> list:
 
                 if title and href and href.startswith('http'):
                     domain = urlparse(href).netloc
+                    snippet = await result.text_content()
                     leads.append({
-                        "platform": "duckduckgo",
+                        "platform": _social_platform_from_url(href),
                         "username": title.strip(),
                         "profile_url": href,
-                        "email": None,
+                        "email": _first_public_email(snippet or ""),
                         "followers": 0,
-                        "tags": [keyword, domain]
+                        "tags": [keyword, domain],
+                        "metadata": _extract_asset_metadata(snippet or "", href, title.strip()),
                     })
             except Exception:
                 continue
@@ -1153,6 +2034,24 @@ async def _scrape_duckduckgo(page, keyword: str) -> list:
         print(f"[API] DuckDuckGo: error: {e}")
 
     return leads
+
+
+async def _scrape_platform_search_fallback(page, keyword: str, platform: str) -> list:
+    """Use public search only for profiles on the platform the user selected."""
+    domain_queries = {
+        "linkedin": f'site:linkedin.com "{keyword}"',
+        "x": f'(site:x.com OR site:twitter.com) "{keyword}"',
+        "twitter": f'(site:x.com OR site:twitter.com) "{keyword}"',
+        "facebook": f'site:facebook.com "{keyword}"',
+        "instagram": f'site:instagram.com "{keyword}"',
+        "tiktok": f'site:tiktok.com "{keyword}"',
+    }
+    expected_platforms = {"x", "twitter"} if platform in {"x", "twitter"} else {platform}
+    query = domain_queries.get(platform)
+    if not query:
+        return []
+    results = await _scrape_duckduckgo(page, query)
+    return [lead for lead in results if lead.get("platform") in expected_platforms]
 
 
 async def _scrape_public_directory(page, keyword: str) -> list:
@@ -1183,6 +2082,7 @@ async def _scrape_public_directory(page, keyword: str) -> list:
                 name = await name_el.text_content() if name_el else ""
                 phone = await phone_el.text_content() if phone_el else ""
                 href = await link_el.get_attribute('href') if link_el else ""
+                listing_text = await listing.text_content()
 
                 if name:
                     profile_url = href if href.startswith('http') else f'https://www.yellowpages.com{href}'
@@ -1190,9 +2090,10 @@ async def _scrape_public_directory(page, keyword: str) -> list:
                         "platform": "directory",
                         "username": name.strip(),
                         "profile_url": profile_url,
-                        "email": None,
+                        "email": _first_public_email(listing_text or ""),
                         "followers": 0,
-                        "tags": [keyword, "business", phone.strip() if phone else ""]
+                        "tags": [keyword, "business", phone.strip() if phone else ""],
+                        "metadata": _extract_asset_metadata(listing_text or "", profile_url, name.strip()),
                     })
             except Exception:
                 continue
@@ -1203,6 +2104,600 @@ async def _scrape_public_directory(page, keyword: str) -> list:
         print(f"[API] Directory: error: {e}")
 
     return leads
+
+
+async def _extract_email_from_public_page(page, url: str) -> str | None:
+    """Visit a public company page and extract the first visible business email."""
+    if not _is_email_lookup_candidate(url):
+        return None
+
+    from urllib.parse import urljoin, urlparse
+
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+        if response and response.status >= 400:
+            return None
+        await page.wait_for_load_state("networkidle", timeout=3000)
+    except Exception:
+        pass
+
+    try:
+        content = await page.content()
+        email = _first_public_email(content)
+        if email:
+            return email
+
+        mailto_links = await page.query_selector_all('a[href^="mailto:"]')
+        for link in mailto_links:
+            href = await link.get_attribute("href")
+            email = _first_public_email(href or "")
+            if email:
+                return email
+
+        base_host = urlparse(page.url or url).netloc.lower().split(":", 1)[0].removeprefix("www.")
+        contact_links = await page.query_selector_all(
+            'a[href*="contact" i], a[href*="about" i], a[href*="impressum" i], a[href*="support" i]'
+        )
+        candidates: list[str] = []
+        for link in contact_links[:8]:
+            href = await link.get_attribute("href")
+            if not href:
+                continue
+            absolute = urljoin(page.url or url, href)
+            host = urlparse(absolute).netloc.lower().split(":", 1)[0].removeprefix("www.")
+            if host == base_host and absolute not in candidates:
+                candidates.append(absolute)
+
+        for candidate in candidates[:3]:
+            try:
+                response = await page.goto(candidate, wait_until="domcontentloaded", timeout=10000)
+                if response and response.status >= 400:
+                    continue
+                content = await page.content()
+                email = _first_public_email(content)
+                if email:
+                    return email
+            except Exception:
+                continue
+    except Exception as exc:
+        print(f"[API] Email enrichment failed for {url}: {exc}")
+    return None
+
+
+async def _discover_email_from_search(page, lead: dict, keyword: str = "") -> str | None:
+    """Use public search results to find a likely company site, then extract its email."""
+    query = _lead_email_discovery_query(lead, keyword)
+    if not query.strip():
+        return None
+
+    try:
+        results = await _public_search_results(page, query, limit=12)
+        candidates = [
+            url
+            for url, score in sorted(
+                ((result["url"], _score_company_site_candidate(result["url"], result.get("title", ""), lead, keyword)) for result in results),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+            if score >= 0
+        ]
+
+        for candidate in candidates[:3]:
+            email = await _extract_email_from_public_page(page, candidate)
+            if email:
+                return email
+    except Exception as exc:
+        print(f"[API] Email search discovery failed for {lead.get('username')}: {exc}")
+    return None
+
+
+async def _public_search_results(page, query: str, limit: int = 8) -> list[dict[str, str]]:
+    """Return normalized public search results from lightweight search pages."""
+    import urllib.parse
+
+    if not query.strip():
+        return []
+    search_targets = [
+        f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}",
+        f"https://www.bing.com/search?q={urllib.parse.quote(query)}",
+    ]
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for search_url in search_targets:
+        try:
+            response = await page.goto(search_url, wait_until="domcontentloaded", timeout=12000)
+            if response and response.status >= 400:
+                continue
+            await asyncio.sleep(0.8)
+            content = await page.content()
+            if _is_search_verification_page(content):
+                continue
+            anchors = await page.eval_on_selector_all(
+                "a",
+                """anchors => anchors.map(a => ({
+                    href: a.href || a.getAttribute('href') || '',
+                    text: (a.innerText || a.textContent || '').trim()
+                }))"""
+            )
+            for anchor in anchors:
+                href = _clean_search_result_url(str(anchor.get("href") or ""))
+                title = re.sub(r"\s+", " ", str(anchor.get("text") or "")).strip()
+                if not href.startswith(("http://", "https://")):
+                    continue
+                if href in seen:
+                    continue
+                host = _host_from_url(href)
+                if not host or host in {"r.search.yahoo.com"}:
+                    continue
+                if "duckduckgo.com/y.js" in href or "/search?" in href and any(engine in host for engine in ("bing.com", "google.com")):
+                    continue
+                seen.add(href)
+                results.append({"url": href, "title": title})
+                if len(results) >= limit:
+                    return results
+        except Exception as exc:
+            print(f"[API] Public search failed for query={query!r}: {exc}")
+            continue
+    return results
+
+
+async def _discover_company_site_from_search(page, lead: dict, keyword: str = "") -> str | None:
+    """Find a likely official company site for a lead through public search results."""
+    company = _searchable_company_name(lead, keyword)
+    query = f'"{company}" {keyword} official website'.strip() if company else _lead_email_discovery_query(lead, keyword).replace("contact email", "official website")
+    if not query.strip():
+        return None
+    results = await _public_search_results(page, query, limit=12)
+    scored = sorted(
+        ((result["url"], _score_company_site_candidate(result["url"], result.get("title", ""), lead, keyword)) for result in results),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    for href, score in scored:
+        if score >= 0:
+            return href
+    return None
+
+
+async def _discover_linkedin_asset_from_search(page, lead: dict, keyword: str = "") -> str | None:
+    """Find a likely LinkedIn company or decision-maker URL through public search."""
+    company = _searchable_company_name(lead, keyword)
+    if not company:
+        return None
+    query = f'site:linkedin.com/company "{company}"'
+    results = await _public_search_results(page, query, limit=10)
+    for result in results:
+        href = result["url"]
+        if re.search(r"https?://(?:[a-z]+\.)?linkedin\.com/(?:company|in)/", href, re.IGNORECASE):
+            return href
+    return None
+
+
+def _company_asset_search_queries(keyword: str) -> list[str]:
+    keyword = re.sub(r"\s+", " ", str(keyword or "")).strip()
+    if not keyword:
+        return []
+    modifiers = [
+        "manufacturer official website",
+        "private label manufacturer contact",
+        "supplier contact email",
+        "wholesale supplier official website",
+        "distributor official website",
+        "factory exporter contact",
+        "brand official store contact",
+        "contractor company contact",
+        "wholesale company official website",
+    ]
+    quoted = [f'"{keyword}" {modifier}' for modifier in modifiers]
+    broad = [f"{keyword} {modifier}" for modifier in modifiers[:5]]
+    return quoted + broad
+
+
+async def _discover_company_asset_leads(
+    page,
+    keyword: str,
+    existing_hosts: set[str] | None = None,
+    source_platform: str = "all",
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Actively discover company websites from a keyword and convert them into asset leads."""
+    existing_hosts = existing_hosts or set()
+    discovered: list[dict[str, Any]] = []
+    seen_hosts = set(existing_hosts)
+
+    for query in _company_asset_search_queries(keyword):
+        if len(discovered) >= limit:
+            break
+        results = await _public_search_results(page, query, limit=20)
+        scored = sorted(
+            (
+                (
+                    result,
+                    _score_company_site_candidate(
+                        result["url"],
+                        result.get("title", ""),
+                        {"username": keyword, "metadata": {"company_name": result.get("title", "")}},
+                        keyword,
+                    ),
+                )
+                for result in results
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        for result, score in scored:
+            if len(discovered) >= limit:
+                break
+            url = result["url"].split("#", 1)[0]
+            host = _host_from_url(url)
+            if not host or host in seen_hosts or score < 0:
+                continue
+            seen_hosts.add(host)
+            metadata = _extract_asset_metadata("", url, result.get("title", ""))
+            page_metadata = await _extract_company_assets_from_public_page(page, url)
+            metadata.update({key: value for key, value in page_metadata.items() if value and not metadata.get(key)})
+            email = await _extract_email_from_public_page(page, metadata.get("website") or url)
+            if email:
+                metadata["email"] = email
+            linkedin_url = metadata.get("linkedin_url")
+            if not linkedin_url:
+                linkedin_url = await _discover_linkedin_asset_from_search(
+                    page,
+                    {"username": metadata.get("company_name") or result.get("title") or keyword, "metadata": metadata},
+                    keyword,
+                )
+                if linkedin_url:
+                    metadata["linkedin_url"] = linkedin_url
+            company_name = _clean_company_asset_name(metadata.get("company_name") or result.get("title") or host)
+            if not company_name:
+                company_name = host.split(".", 1)[0].replace("-", " ").title()
+            lead = {
+                "platform": "directory",
+                "username": company_name,
+                "profile_url": metadata.get("website") or url,
+                "email": email,
+                "followers": 0,
+                "tags": [keyword, "company_asset", "official_site", host],
+                "metadata": {
+                    **metadata,
+                    "company_name": company_name,
+                    "website": metadata.get("website") or url,
+                    "domain": host,
+                    "asset_source": "keyword_company_search",
+                    "source_platform": source_platform,
+                    "asset_search_query": query,
+                },
+            }
+            _apply_customer_development_rules(lead)
+            discovered.append(lead)
+    return discovered
+
+
+async def _extract_company_assets_from_public_page(page, url: str) -> dict[str, str]:
+    """Visit a company page and extract structured business asset hints."""
+    if not _is_email_lookup_candidate(url):
+        return {}
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+        if response and response.status >= 400:
+            return {}
+        await page.wait_for_load_state("networkidle", timeout=3000)
+    except Exception:
+        pass
+    try:
+        title = await page.title()
+        description = ""
+        meta = await page.query_selector('meta[name="description"], meta[property="og:description"]')
+        if meta:
+            description = await meta.get_attribute("content") or ""
+        content = await page.content()
+        metadata = _extract_asset_metadata(f"{description} {content}", page.url or url, title)
+        contact_links = await page.query_selector_all(
+            'a[href*="linkedin.com" i], a[href*="crunchbase.com" i], a[href*="about" i], a[href*="team" i]'
+        )
+        link_text = []
+        for link in contact_links[:12]:
+            href = await link.get_attribute("href")
+            if href:
+                link_text.append(href)
+        _merge_metadata({"metadata": metadata}, _extract_asset_metadata(" ".join(link_text), page.url or url, title))
+        return metadata
+    except Exception as exc:
+        print(f"[API] Asset enrichment failed for {url}: {exc}")
+    return {}
+
+
+async def _resolve_public_redirect(page, url: str) -> str:
+    """Resolve short links such as t.co into a usable public destination."""
+    if not url or not url.startswith(("http://", "https://")):
+        return ""
+    try:
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=8000)
+        if response and response.status >= 400:
+            return ""
+        resolved = page.url or url
+        if _is_email_lookup_candidate(resolved) and _is_search_result_host_allowed(resolved):
+            return resolved.split("?", 1)[0].rstrip("/")
+    except Exception:
+        return ""
+    return ""
+
+
+async def _extract_assets_from_social_profile(page, lead: dict) -> dict[str, str]:
+    """Extract asset hints from an owned social profile page before using search."""
+    profile_url = _social_profile_url(lead)
+    if not profile_url or not any(domain in profile_url.lower() for domain in ("x.com/", "twitter.com/", "linkedin.com/")):
+        return {}
+    metadata: dict[str, str] = {}
+    try:
+        response = await page.goto(profile_url, wait_until="domcontentloaded", timeout=10000)
+        if response and response.status >= 400:
+            return {}
+        await asyncio.sleep(2)
+        body_text = await page.locator("body").inner_text(timeout=3000)
+        metadata.update(_extract_asset_metadata(body_text, "", _searchable_company_name(lead)))
+        profile_bio = ""
+        for selector in ('[data-testid="UserDescription"]', '.text-body-medium', '[data-test-id="profile-description"]'):
+            try:
+                profile_bio = (await page.locator(selector).first.inner_text(timeout=1000)).strip()
+                if profile_bio:
+                    break
+            except Exception:
+                continue
+        if profile_bio:
+            metadata["summary"] = profile_bio[:1000]
+            metadata["profile_evidence"] = profile_bio[:1000]
+        metadata["profile_url"] = profile_url
+        email = _first_public_email(body_text)
+        if email:
+            metadata["email"] = email
+        anchors = await page.eval_on_selector_all(
+            "a",
+            """anchors => anchors.map(a => ({
+                href: a.href || a.getAttribute('href') || '',
+                text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim()
+            }))"""
+        )
+        shortlinks: list[str] = []
+        for anchor in anchors[:80]:
+            href = anchor.get("href", "")
+            candidate = _candidate_url_from_social_anchor(href, anchor.get("text", ""))
+            host = _host_from_url(href)
+            if candidate:
+                metadata.setdefault("website", candidate)
+                metadata.setdefault("website_source", "social_profile_link")
+                host = _host_from_url(candidate)
+                if host:
+                    metadata.setdefault("domain", host)
+                break
+            if href and (host in SOCIAL_SHORTLINK_HOSTS or host.endswith(".t.co")):
+                shortlinks.append(href)
+        if not metadata.get("website"):
+            for shortlink in shortlinks[:3]:
+                candidate = await _resolve_public_redirect(page, shortlink)
+                if candidate:
+                    metadata.setdefault("website", candidate)
+                    metadata.setdefault("website_source", "social_profile_redirect")
+                    host = _host_from_url(candidate)
+                    if host:
+                        metadata.setdefault("domain", host)
+                    break
+        if "linkedin.com" in profile_url.lower():
+            metadata.setdefault("linkedin_url", profile_url.split("?", 1)[0].rstrip("/"))
+        country = _infer_country(metadata.get("website", ""), body_text)
+        if country:
+            metadata.setdefault("country", country)
+    except Exception as exc:
+        print(f"[API] Social profile asset extraction failed for {profile_url}: {exc}")
+    return metadata
+
+
+async def _enrich_leads_with_public_emails(page, leads: list[dict], keyword: str = "", limit: int = 25) -> int:
+    """Fill lead assets using the customer-development priority order."""
+    found = 0
+    checked = 0
+    for lead in leads:
+        _apply_customer_development_rules(lead)
+        if checked >= limit:
+            break
+        profile_url = str(lead.get("profile_url") or "").strip()
+        tags = lead.get("tags") or []
+        metadata = lead.get("metadata") or {}
+        has_core_assets = bool(metadata.get("website") or lead.get("email"))
+        if "linkedin_text_result" in tags and not profile_url and not _clean_company_asset_name(metadata.get("company_name") or lead.get("username") or ""):
+            continue
+        if has_core_assets and metadata.get("linkedin_url") and lead.get("email"):
+            continue
+        checked += 1
+        email = None
+        before_email = bool(lead.get("email"))
+        company_url = metadata.get("website") or (profile_url if _is_email_lookup_candidate(profile_url) else None)
+        if not company_url and profile_url:
+            profile_metadata = await _extract_assets_from_social_profile(page, lead)
+            if profile_metadata:
+                if profile_metadata.get("email") and not lead.get("email"):
+                    lead["email"] = profile_metadata["email"]
+                _merge_metadata(lead, {key: value for key, value in profile_metadata.items() if key != "email"})
+                company_url = (lead.get("metadata") or {}).get("website")
+        if not company_url:
+            company_url = await _discover_company_site_from_search(page, lead, keyword)
+        if company_url:
+            _merge_metadata(lead, _extract_asset_metadata("", company_url, ""))
+            _merge_metadata(lead, await _extract_company_assets_from_public_page(page, company_url))
+            if not lead.get("email"):
+                email = await _extract_email_from_public_page(page, company_url)
+        if not lead.get("email") and not email:
+            email = await _discover_email_from_search(page, lead, keyword)
+        if email:
+            lead["email"] = email
+            tags = [tag for tag in (lead.get("tags") or []) if tag]
+            if "email_found" not in tags:
+                tags.append("email_found")
+            lead["tags"] = tags
+        metadata = lead.get("metadata") or {}
+        if not metadata.get("linkedin_url"):
+            linkedin_url = await _discover_linkedin_asset_from_search(page, lead, keyword)
+            if linkedin_url:
+                _merge_metadata(lead, {"linkedin_url": linkedin_url})
+        if not (lead.get("metadata") or {}).get("country"):
+            country = _infer_country((lead.get("metadata") or {}).get("website") or profile_url, " ".join(tags))
+            if country:
+                _merge_metadata(lead, {"country": country})
+        _apply_customer_development_rules(lead)
+        metadata = lead.get("metadata") or {}
+        has_outreach_assets = bool(metadata.get("website") and lead.get("email"))
+        metadata["enrichment_status"] = "outreach_ready" if has_outreach_assets else "missing_public_contact"
+        if not has_outreach_assets:
+            metadata["enrichment_note"] = "No public business email was found; verify the company website before outreach."
+        lead["metadata"] = metadata
+        if lead.get("email") and not before_email:
+            found += 1
+    return found
+
+
+@router.post("/enrich-assets")
+async def enrich_lead_assets(request: AssetEnrichmentRequest, current_user=Depends(get_current_user)):
+    """Apply the foreign-trade customer-development rules to existing leads."""
+    from db import get_db_pool as _get_pool
+
+    requested_platform = str(request.platform or "all").lower()
+    platform_filter = None
+    if requested_platform in {"x", "twitter"}:
+        platform_filter = ["x", "twitter"]
+    elif requested_platform and requested_platform != "all":
+        platform_filter = [requested_platform]
+
+    pool_db = await _get_pool()
+    async with pool_db.acquire() as conn:
+        if request.lead_ids:
+            rows = await conn.fetch(
+                f"""SELECT id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at
+                   FROM leads
+                   WHERE user_id = $1 AND id = ANY($2::int[])
+                   ORDER BY created_at DESC
+                   LIMIT $3""",
+                current_user.id,
+                request.lead_ids,
+                request.limit,
+            )
+        else:
+            platform_sql = "AND platform = ANY($3::text[])" if platform_filter else ""
+            rows = await conn.fetch(
+                f"""SELECT id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at
+                   FROM leads
+                   WHERE user_id = $1
+                   {platform_sql}
+                   ORDER BY created_at DESC
+                   LIMIT $2""",
+                current_user.id,
+                request.limit,
+                *( [platform_filter] if platform_filter else [] ),
+            )
+    leads: list[dict[str, Any]] = []
+    for row in rows:
+        lead = dict(row)
+        metadata = lead.get("metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except Exception:
+                metadata = {}
+        lead["metadata"] = metadata
+        lead["email"] = sanitize_lead_email(lead.get("email"))
+        lead["tags"] = list(lead.get("tags") or [])
+        leads.append(lead)
+    if not leads:
+        raise HTTPException(status_code=404, detail="No owned leads found")
+
+    pool = get_browser_pool()
+    if not pool._started:
+        await pool.start()
+
+    configured_user_data_dir = os.getenv("CHROME_USER_DATA_DIR")
+    if configured_user_data_dir and not os.path.isdir(configured_user_data_dir):
+        configured_user_data_dir = None
+    user_data_dir = configured_user_data_dir or _auto_detect_chrome_user_data_dir()
+    cdp_url = os.getenv("CDP_URL")
+    context_id = f"asset_enrich_{id(request)}"
+    context_id, context, instance = await pool.acquire_context(
+        context_id=context_id,
+        user_data_dir=user_data_dir,
+        cdp_url=cdp_url,
+    )
+
+    try:
+        page = await context.new_page()
+        try:
+            from playwright_stealth import Stealth
+
+            await Stealth().apply_stealth_async(page)
+        except Exception:
+            pass
+        await page.set_extra_http_headers({
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        })
+        counts_before = _asset_presence_counts(leads)
+        emails_before = sum(1 for lead in leads if lead.get("email"))
+        enriched_email_count = await _enrich_leads_with_public_emails(
+            page,
+            leads,
+            keyword=request.keyword,
+            limit=request.limit,
+        )
+        # Enrich only the selected leads. Keyword-wide discovery belongs to a
+        # separate prospecting workflow and must not add unrelated companies here.
+        company_asset_leads: list[dict[str, Any]] = []
+        for lead in leads:
+            metadata = lead.get("metadata") or {}
+            metadata["last_enriched_at"] = datetime.utcnow().isoformat()
+            lead["metadata"] = metadata
+        counts_after = _asset_presence_counts(leads)
+        await page.close()
+    finally:
+        await pool.release_context(context_id, instance.instance_id)
+
+    async with pool_db.acquire() as conn:
+        for lead in leads:
+            metadata = lead.get("metadata") or {}
+            await conn.execute(
+                """UPDATE leads
+                   SET email = COALESCE($3, email),
+                       tags = $4,
+                       metadata = COALESCE(metadata, '{}'::jsonb) || $5::jsonb,
+                       quality_score = $6
+                   WHERE id = $1 AND user_id = $2""",
+                lead["id"],
+                current_user.id,
+                sanitize_lead_email(lead.get("email")),
+                lead.get("tags") or [],
+                json.dumps(metadata, ensure_ascii=False, default=str),
+                int(metadata.get("quality_score") or 0),
+            )
+    if company_asset_leads:
+        from db import save_leads
+
+        await save_leads(company_asset_leads, current_user.id)
+
+    emails_after = sum(1 for lead in leads if lead.get("email"))
+    company_counts = _asset_presence_counts(company_asset_leads)
+    return {
+        "status": "success",
+        "rules_version": _customer_development_rules().get("version", "fallback"),
+        "enriched": len(leads),
+        "created_assets": len(company_asset_leads),
+        "emails_enriched": enriched_email_count,
+        "emails_found": max(0, emails_after - emails_before),
+        "fields_found": counts_after,
+        "fields_added": {
+            field: max(0, counts_after.get(field, 0) - counts_before.get(field, 0))
+            for field in counts_after
+        },
+        "created_fields_found": company_counts,
+        "debug": _asset_debug_summary(leads, request.keyword),
+        "data": leads,
+        "created_data": company_asset_leads,
+    }
 
 
 @router.post("/test-scraper")
@@ -1231,8 +2726,13 @@ async def test_scraper(request: ScrapeRequest, current_user=Depends(get_current_
         if proxy_url:
             proxy_config = {"host": proxy_url}
 
-        # 读取 Chrome 用户数据目录（用于保持登录态），未设置时自动检测
-        user_data_dir = os.getenv("CHROME_USER_DATA_DIR") or _auto_detect_chrome_user_data_dir()
+        # 读取 Chrome 用户数据目录（用于保持登录态）。配置路径不存在时自动回退检测，
+        # 避免机器用户名变化导致 LinkedIn 登录态不可用。
+        configured_user_data_dir = os.getenv("CHROME_USER_DATA_DIR")
+        if configured_user_data_dir and not os.path.isdir(configured_user_data_dir):
+            print(f"[API] CHROME_USER_DATA_DIR does not exist: {configured_user_data_dir}; auto-detecting")
+            configured_user_data_dir = None
+        user_data_dir = configured_user_data_dir or _auto_detect_chrome_user_data_dir()
 
         # 读取 CDP URL（优先使用，保持登录态更稳定）
         cdp_url = os.getenv("CDP_URL")
@@ -1289,19 +2789,16 @@ async def test_scraper(request: ScrapeRequest, current_user=Depends(get_current_
             else:
                 # 未知平台，返回 mock
                 pass
+            direct_result_count = len(leads)
+            direct_page_url = page.url
 
-            # 平台直连爬取失败时，回退到 DuckDuckGo 搜索（无需登录，不封 headless）
+            # 平台直连爬取失败时，仅回退到该平台的公开索引。不要用其它平台
+            # 的结果冒充当前平台线索，否则会污染线索质量和后续资产补全范围。
             if not leads and platform not in ["google", "directory", "duckduckgo"]:
-                print(f"[API] {platform} returned 0 leads, falling back to DuckDuckGo search")
-                scrape_source = f"{platform}+ddg"
-                leads = await _scrape_duckduckgo(page, f"{request.keyword} {platform}")
-                # DuckDuckGo 也失败则尝试 Google
-                if not leads:
-                    print("[API] DuckDuckGo returned 0 leads, trying Google search")
-                    scrape_source = f"{platform}+google"
-                    leads = await _scrape_google(page, f"{request.keyword} {platform}", suffix="")
+                print(f"[API] {platform} returned 0 leads, searching public {platform} profile index")
+                scrape_source = f"{platform}+public_search"
+                leads = await _scrape_platform_search_fallback(page, request.keyword, platform)
 
-            await page.close()
 
             # 应用扩展参数过滤
             if request.geography != "all":
@@ -1312,18 +2809,51 @@ async def test_scraper(request: ScrapeRequest, current_user=Depends(get_current_
                 leads = [l for l in leads if _match_content_type(l, request.content_type)]
             if request.max_results > 0 and len(leads) > request.max_results:
                 leads = leads[:request.max_results]
+            scraped_social_count = len(leads)
+            emails_before_enrichment = sum(1 for lead in leads if lead.get("email"))
+            company_asset_leads: list[dict[str, Any]] = []
+            # Keep social profiles even when public website/email fields are empty.
+            # Deep company discovery runs only from /enrich-assets on user request.
+            dropped_empty_social = 0
+            enriched_email_count = 0
+            emails_found = sum(1 for lead in leads if lead.get("email"))
+            if enriched_email_count:
+                print(f"[API] Email enrichment: found {enriched_email_count} additional emails")
+            for lead in leads:
+                _apply_customer_development_rules(lead)
+
+            await page.close()
 
             # 保存真实数据到数据库（跳过空结果，不写入伪造数据）
             if leads:
                 from db import save_leads
                 await save_leads(leads, current_user.id)
 
+            diagnostics = {
+                "direct_result_count": direct_result_count,
+                "returned_result_count": len(leads),
+            }
+            if not leads:
+                if "login" in direct_page_url.lower() or "checkpoint" in direct_page_url.lower():
+                    diagnostics["reason"] = "login_required"
+                elif direct_result_count:
+                    diagnostics["reason"] = "filtered_by_targeting"
+                else:
+                    diagnostics["reason"] = "no_matching_profiles"
+
             return {
                 "status": "success",
                 "leads_found": len(leads),
+                "emails_found": emails_found,
+                "emails_enriched": max(0, emails_found - emails_before_enrichment),
+                "company_assets_found": len(company_asset_leads),
+                "asset_fields_found": _asset_presence_counts(company_asset_leads),
+                "scraped_social_found": scraped_social_count,
+                "empty_social_dropped": dropped_empty_social,
                 "source": scrape_source,
                 "context_id": context_id,
                 "instance_id": instance.instance_id,
+                "diagnostics": diagnostics,
                 "data": leads
             }
 
@@ -1512,9 +3042,14 @@ async def harness_scrape(
 
     harness_mgr = await get_harness_manager()
     if not harness_mgr.is_connected:
+        await harness_mgr.start()
+    if not harness_mgr.is_connected:
         return {
             "status": "error",
-            "message": "Browser harness not connected. Ensure Chrome is running with --remote-debugging-port=9222"
+            "message": (
+                "Browser harness not connected. Verify browser-harness 0.1.3+ is installed, "
+                "Chrome is running with --remote-debugging-port=9222, and remote debugging is allowed in Chrome."
+            ),
         }
 
     try:
@@ -1578,15 +3113,25 @@ import re as _re
 
 _pipeline_semaphore = asyncio.Semaphore(3)
 
-RESEARCH_SYSTEM_PROMPT = """You are a B2B lead research analyst for cross-border e-commerce. Analyze the given lead profile and return a JSON object with these fields:
+RESEARCH_SYSTEM_PROMPT = """You are a B2B lead research analyst for cross-border e-commerce. Use only these five files as the business standard:
+- product_brief.md: main product is "用户填写"; core advantage is "用户填写".
+- target_market.md: target Europe and North America; prioritize engineering distributors, lighting contractors, renovation companies; do not develop retailers, trading middlemen, or price-only contacts.
+- scoring_rules.md: S=8-10, A=5-7, B=3-4, C=<3 abandon. Score = industry fit 3 + annual purchase volume 2 + existing supplier pain 2 + decision-maker accessibility 2 + project urgency 1.
+- email_style.md: direct professional tone; first sentence must mention the customer's specific project or product; do not quote price upfront; end by guiding the customer to ask about lead time or available stock; never use "hope this email finds you well".
+- follow_up_sop.md: day 3 follow-up, day 7 case, day 14 project progress; after 30 days without reply downgrade to C.
+
+Analyze the given lead profile and return a JSON object with these fields:
 - "industry": the lead's likely business type or industry (1-5 words, in English)
 - "interests": array of 2-4 potential business interests or needs (in English)
 - "best_channel": either "email" or "social_dm" based on which outreach method would be most effective
 - "talking_points": array of 2-3 personalized conversation starters based on their profile (in English)
-- "quality_score": integer 0-100 estimating lead quality (consider followers, profile completeness, relevance)
-- "tier": "A" if quality_score >= 75, "B" if >= 50, "C" otherwise
+- "quality_score": integer 0-10 based only on scoring_rules.md
+- "tier": "S" for 8-10, "A" for 5-7, "B" for 3-4, "C" for <3
+- "score_breakdown": object with industry_fit, annual_purchase, supplier_pain, decision_access, urgency
+- "disqualified": true only for retailers, trading middlemen, or price-only contacts
 
-Use the language explicitly requested by the user for descriptive text fields.
+The marketing pipeline always creates customer-facing outreach in English, even if the app UI is Chinese.
+Write every descriptive field in natural business English. Do not use Chinese or any other non-English language.
 Respond with ONLY valid JSON, no markdown, no explanation."""
 
 CHAT_SYSTEM_PROMPT = """You are a B2B marketing copywriter for cross-border e-commerce. Given a lead's research profile, generate personalized outreach messages for 3 channels. Return a JSON object with a "messages" array containing exactly 3 objects, each with:
@@ -1596,12 +3141,15 @@ CHAT_SYSTEM_PROMPT = """You are a B2B marketing copywriter for cross-border e-co
 - "cta": call to action text
 
 Guidelines:
-- Reference specific details from the lead's profile and interests
-- Match the tone to the platform (professional for email/LinkedIn, casual for Twitter)
-- For tier A leads, be more detailed and personalized
-- For tier C leads, keep it brief and value-focused
-- Include a clear call-to-action in each message
-- Use the language explicitly requested by the user for subject, body, and cta
+- Reference specific project or product details from the lead's profile and interests in the first sentence.
+- Do not generate outreach for C-tier or disqualified leads.
+- Use a direct professional tone; no generic pleasantries.
+- Do not quote price upfront.
+- Do not invent products beyond product_context, prices, discounts, customer names, case studies, guarantees, or capabilities.
+- End each message by guiding the customer to ask about lead time or available stock.
+- Never use "hope this email finds you well".
+- The marketing pipeline always creates customer-facing outreach in English, even if the app UI is Chinese.
+- Write subject, body, and cta in natural business English only. Do not use Chinese or any other non-English language.
 
 Respond with ONLY valid JSON, no markdown."""
 
@@ -1616,16 +3164,19 @@ def _strip_json_fences(text: str) -> str:
 
 def _lead_fallback_research(lead: dict) -> dict:
     """Fallback research when LLM fails."""
-    followers = lead.get("followers", 0)
-    score = min(95, max(20, 35 + followers // 500))
-    tier = "A" if score >= 75 else ("B" if score >= 50 else "C")
+    tag_values = [str(tag).strip() for tag in lead.get("tags", []) if str(tag).strip()]
+    english_tags = [tag for tag in tag_values if not _contains_non_english_script(tag)]
+    industry = english_tags[0] if english_tags else "Unknown"
+    scoring = score_lead(lead, {"industry": industry, "interests": english_tags})
     return {
-        "industry": lead.get("tags", ["Unknown"])[0] if lead.get("tags") else "Unknown",
-        "interests": lead.get("tags", [])[:3] or ["general business"],
+        "industry": industry,
+        "interests": english_tags[:3] or ["project procurement"],
         "best_channel": "email" if lead.get("email") else "social_dm",
-        "talking_points": [f"Active on {lead.get('platform', 'social media')}", "Potential collaboration opportunity"],
-        "quality_score": score,
-        "tier": tier
+        "talking_points": [first_specific_signal(lead, {"industry": industry, "interests": english_tags})],
+        "quality_score": scoring["score"],
+        "tier": scoring["tier"],
+        "score_breakdown": scoring["breakdown"],
+        "disqualified": is_disqualified_lead(lead, {"industry": industry, "interests": english_tags}),
     }
 
 
@@ -1635,7 +3186,8 @@ def _clean_research_result(result: dict, lead: dict) -> dict:
     if not isinstance(result, dict):
         return fallback
     try:
-        score = min(100, max(0, int(result.get("quality_score", fallback["quality_score"]))))
+        raw_score = int(result.get("quality_score", fallback["quality_score"]))
+        score = min(10, max(0, raw_score if raw_score <= 10 else round(raw_score / 10)))
     except (TypeError, ValueError):
         score = fallback["quality_score"]
 
@@ -1644,19 +3196,27 @@ def _clean_research_result(result: dict, lead: dict) -> dict:
         if not isinstance(values, list):
             return fallback[key]
         cleaned = [str(value).strip() for value in values if str(value).strip()][:maximum]
+        if any(_contains_non_english_script(value) for value in cleaned):
+            return fallback[key]
         return cleaned or fallback[key]
 
     industry = str(result.get("industry") or fallback["industry"]).strip()[:80]
-    if not industry or any(marker in industry for marker in ("\ufffd", "锛", "銆", "鈥")):
+    if not industry or any(marker in industry for marker in ("\ufffd", "锛", "銆", "鈥")) or _contains_non_english_script(industry):
         industry = fallback["industry"]
-    return {
+    cleaned = {
         "industry": industry,
         "interests": clean_list("interests", 4),
         "best_channel": result.get("best_channel") if result.get("best_channel") in {"email", "social_dm"} else fallback["best_channel"],
         "talking_points": clean_list("talking_points", 3),
         "quality_score": score,
-        "tier": "A" if score >= 75 else ("B" if score >= 50 else "C"),
+        "tier": "S" if score >= 8 else ("A" if score >= 5 else ("B" if score >= 3 else "C")),
+        "score_breakdown": result.get("score_breakdown") if isinstance(result.get("score_breakdown"), dict) else fallback["score_breakdown"],
+        "disqualified": bool(result.get("disqualified")) or is_disqualified_lead(lead, result),
     }
+    if cleaned["disqualified"]:
+        cleaned["quality_score"] = 0
+        cleaned["tier"] = "C"
+    return cleaned
 
 
 async def _research_lead(client, lead: dict, product_context: str, language: str) -> dict:
@@ -1675,10 +3235,7 @@ async def _research_lead(client, lead: dict, product_context: str, language: str
 
             if product_context:
                 user_prompt += f"\n\nProduct context: {product_context}"
-            if language == "zh":
-                user_prompt += "\n\n请用中文回复所有字段。"
-            else:
-                user_prompt += "\n\nIMPORTANT: Write ALL fields (industry, interests, talking_points) in English only."
+            user_prompt += "\n\nIMPORTANT: Write ALL fields (industry, interests, talking_points) in English only. Do not use Chinese or any other non-English language."
 
             response, _ = await _create_marketing_completion(
                 client,
@@ -1699,6 +3256,8 @@ async def _research_lead(client, lead: dict, product_context: str, language: str
 
 async def _generate_messages(client, lead: dict, research: dict, product_context: str, language: str) -> list:
     """Chat Agent: generate personalized outreach messages."""
+    if research.get("tier") == "C" or research.get("disqualified") or is_disqualified_lead(lead, research):
+        return []
     if client is None:
         return _fallback_messages(lead, research, language)
     async with _pipeline_semaphore:
@@ -1711,15 +3270,17 @@ async def _generate_messages(client, lead: dict, research: dict, product_context
 - Best channel: {research.get('best_channel', 'email')}
 - Talking points: {research.get('talking_points', [])}
 - Quality tier: {research.get('tier', 'C')}
+- Score breakdown: {research.get('score_breakdown', {})}
 - Followers: {lead.get('followers', 0)}
 - Email: {lead.get('email') or 'none'}"""
 
             if product_context:
                 user_prompt += f"\n\nProduct context: {product_context}"
-            if language == "zh":
-                user_prompt += "\n\n请用中文撰写所有消息（subject、body、cta）。"
-            else:
-                user_prompt += "\n\nIMPORTANT: Write ALL messages (subject, body, cta) in English only. Do not use Chinese."
+            user_prompt += f"""\n
+Target markets: {", ".join(TARGET_MARKETS)}
+Priority customer types: {", ".join(PRIORITY_CUSTOMERS)}
+
+IMPORTANT: Write ALL messages (subject, body, cta) in English only. Do not use Chinese or any other non-English language."""
 
             response, _ = await _create_marketing_completion(
                 client,
@@ -1748,8 +3309,12 @@ async def _generate_messages(client, lead: dict, research: dict, product_context
 
 def _fallback_messages(lead: dict, research: dict, language: str) -> list:
     """Fallback messages when LLM fails."""
+    if research.get("tier") == "C" or research.get("disqualified") or is_disqualified_lead(lead, research):
+        return []
     username = lead.get("username", "")
-    industry = research.get("industry", "your industry")
+    industry = research.get("industry", "your project")
+    if language == "en" and _contains_non_english_script(str(industry)):
+        industry = "your project"
     if language == "zh":
         return [
             {"channel": "email", "subject": f"关于 {industry} 的合作机会", "body": f"您好，{username}：\n\n关注到您在 {industry} 领域的持续投入。我们正在帮助相关团队提升获客与转化效率，希望了解您当前最关注的增长方向。\n\n如果您方便，是否可以安排一次 15 分钟沟通？", "cta": "预约 15 分钟交流"},
@@ -1757,10 +3322,11 @@ def _fallback_messages(lead: dict, research: dict, language: str) -> list:
             {"channel": "twitter_dm", "subject": "", "body": f"您好，{username}。看到您分享的 {industry} 内容，很有启发。我们在帮助相关团队优化获客与转化，方便简单交流一下吗？", "cta": "简单交流"}
         ]
     else:
+        signal = first_specific_signal(lead, research)
         return [
-            {"channel": "email", "subject": f"Collaboration opportunity in {industry}", "body": f"Hi {username},\n\nWe noticed your active presence in {industry} and would love to explore a potential collaboration.", "cta": "Book a 15-min call"},
-            {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}, I came across your profile and found your work in {industry} impressive. Would you be open to a quick chat?", "cta": ""},
-            {"channel": "twitter_dm", "subject": "", "body": f"Hi {username}, I enjoyed your posts on {industry}. We help teams improve acquisition and conversion. Open to a quick exchange?", "cta": "Compare notes"}
+            {"channel": "email", "subject": subject_for_signal(signal), "body": initial_email_body(lead, research, ""), "cta": "Check lead time or stock"},
+            {"channel": "linkedin_dm", "subject": "", "body": f"Hi {username}, I saw your work on {signal}. Before discussing price, should I check lead time or available stock for your current project?", "cta": "Check lead time or stock"},
+            {"channel": "twitter_dm", "subject": "", "body": f"Hi {username}, I saw your work on {signal}. Should I check lead time or available stock for your current project?", "cta": "Check lead time or stock"}
         ]
 
 
@@ -1795,7 +3361,9 @@ async def marketing_pipeline(
         raise HTTPException(status_code=404, detail="No owned leads found")
 
     product_context = request.product_context
-    language = request.language
+    # UI language should not control outbound copy language. This pipeline targets
+    # cross-border prospects, so generated outreach must remain English.
+    language = "en"
     user_id = current_user.id
 
     # Stage 1: Research Agent — analyze all leads concurrently
@@ -1810,11 +3378,11 @@ async def marketing_pipeline(
     all_messages = await asyncio.gather(*message_tasks)
 
     # Stage 3: Save to database and build response
-    tier_distribution = {"A": 0, "B": 0, "C": 0}
+    tier_distribution = {"S": 0, "A": 0, "B": 0, "C": 0}
     results = []
     db_messages = []
     from db import create_marketing_campaign
-    campaign_name = f"{product_context.strip()} Outreach" if product_context.strip() else f"Pipeline Outreach · {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    campaign_name = f"{product_context.strip()} Outreach" if product_context.strip() else f"Pipeline Outreach - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     campaign_id = await create_marketing_campaign(
         user_id=user_id,
         name=campaign_name[:255],
@@ -1878,6 +3446,94 @@ async def marketing_pipeline(
             "generation_mode": generation_mode,
         },
         "results": results
+    }
+
+
+@router.post("/acquisition-pipeline")
+async def acquisition_pipeline(
+    request: AcquisitionPipelineRequest,
+    current_user=Depends(get_current_user),
+):
+    """Search prioritized platforms, persist assets, then draft email outreach.
+
+    The existing scraper owns enrichment and idempotent lead persistence. This
+    orchestration intentionally stops at draft creation; approval and delivery
+    continue through the guarded Chat Agent endpoints.
+    """
+    keyword = request.keyword.strip()
+    platform_runs = []
+    successful_platforms: list[str] = []
+    seen_platforms: set[str] = set()
+
+    for target in _ordered_acquisition_platforms(request.platforms):
+        platform = "x" if target.platform == "twitter" else target.platform
+        if platform in seen_platforms:
+            continue
+        seen_platforms.add(platform)
+        result = await test_scraper(
+            ScrapeRequest(
+                keyword=keyword,
+                platform=platform,
+                max_results=request.max_results_per_platform,
+            ),
+            current_user=current_user,
+        )
+        run = {
+            "platform": platform,
+            "priority": target.priority,
+            "status": result.get("status", "error"),
+            "leads_found": int(result.get("leads_found") or 0),
+            "emails_found": int(result.get("emails_found") or 0),
+            "source": result.get("source", platform),
+        }
+        if run["status"] != "success":
+            run["error"] = result.get("message", "Platform search failed")
+        else:
+            successful_platforms.append(platform)
+        platform_runs.append(run)
+
+    lead_ids: list[int] = []
+    if successful_platforms:
+        from db import get_db_pool as _get_pool
+
+        pool = await _get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT id
+                   FROM leads
+                   WHERE user_id = $1
+                     AND platform = ANY($2::text[])
+                     AND email IS NOT NULL AND BTRIM(email) <> ''
+                     AND $3 = ANY(COALESCE(tags, '{}'::text[]))
+                   ORDER BY quality_score DESC, created_at DESC, id DESC
+                   LIMIT $4""",
+                current_user.id,
+                successful_platforms,
+                keyword,
+                request.max_outreach_leads,
+            )
+        lead_ids = [row["id"] for row in rows]
+
+    outreach = None
+    if lead_ids:
+        outreach = await marketing_pipeline(
+            MarketingPipelineRequest(
+                lead_ids=lead_ids,
+                product_context=request.product_context or keyword,
+                language="en",
+            ),
+            current_user=current_user,
+        )
+
+    failed = sum(run["status"] != "success" for run in platform_runs)
+    return {
+        "status": "success" if failed == 0 else "partial_success",
+        "keyword": keyword,
+        "platform_runs": platform_runs,
+        "assets_persisted": sum(run["leads_found"] for run in platform_runs),
+        "email_ready_lead_ids": lead_ids,
+        "outreach": outreach,
+        "next_action": "review_drafts" if outreach else "refine_search_for_public_emails",
     }
 
 

@@ -403,6 +403,30 @@ body::after {
   color: #fff;
 }
 
+.lead-assets-table {
+  table-layout: fixed;
+}
+
+.lead-assets-table th,
+.lead-assets-table td {
+  padding: 0.85rem 0.9rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  vertical-align: middle;
+}
+
+.lead-assets-table th {
+  white-space: nowrap;
+  word-break: keep-all;
+  writing-mode: horizontal-tb;
+  letter-spacing: 0;
+}
+
+.lead-assets-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .badge {
   padding: 0.5rem 1rem;
   font-size: 0.8rem;

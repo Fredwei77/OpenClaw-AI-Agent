@@ -11,6 +11,7 @@ Task Queue and Scheduler System
 """
 
 import asyncio
+import json
 import os
 import sys
 from collections import deque
@@ -23,7 +24,7 @@ import traceback
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from db import update_task_status
+from db import get_db_pool, update_task_status
 
 
 class TaskStatus(str, Enum):
@@ -413,8 +414,53 @@ class TaskQueue:
 
         # 启动工作协程
         self._worker_task = asyncio.create_task(self._worker_loop())
+        await self._recover_chat_delivery_tasks()
 
         print(f"[TaskQueue] Started (max_concurrent={self.max_concurrent}, redis={self._use_redis})")
+
+    async def _recover_chat_delivery_tasks(self):
+        """Re-enqueue durable chat deliveries left pending by a process restart."""
+        try:
+            pool = await get_db_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT id, user_id, task_type, payload, created_at
+                       FROM tasks
+                       WHERE agent_name = 'ChatDeliveryAgent'
+                         AND status IN ('pending', 'running')
+                       ORDER BY created_at ASC
+                       LIMIT 100"""
+                )
+                if rows:
+                    await conn.execute(
+                        """UPDATE tasks
+                           SET status = 'pending', started_at = NULL, error = NULL
+                           WHERE agent_name = 'ChatDeliveryAgent'
+                             AND status = 'running'"""
+                    )
+
+            for row in rows:
+                payload = row["payload"]
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                payload = payload or {}
+                task = QueuedTask(
+                    task_id=row["id"],
+                    user_id=row["user_id"],
+                    agent_name="ChatDeliveryAgent",
+                    task_type=row["task_type"],
+                    payload=payload,
+                    priority=TaskPriority.HIGH,
+                    created_at=row["created_at"],
+                    platform=self._extract_platform(payload),
+                )
+                priority_value = (-task.priority.value, task.created_at.timestamp())
+                await self._queue.put((priority_value, task))
+
+            if rows:
+                print(f"[TaskQueue] Recovered {len(rows)} pending chat delivery task(s)")
+        except Exception as exc:
+            print(f"[TaskQueue] Chat delivery recovery skipped: {exc}")
 
     async def stop(self):
         """停止任务队列"""
@@ -571,6 +617,24 @@ class TaskQueue:
                 # 执行任务
                 result = await executor({**task.payload, "user_id": task.user_id})
 
+                if (
+                    task.agent_name == "ChatDeliveryAgent"
+                    and isinstance(result, dict)
+                    and result.get("status") == "failed"
+                ):
+                    task.status = TaskStatus.FAILED
+                    task.result = result
+                    task.error = str(result.get("message") or "Social delivery failed")
+                    task.completed_at = datetime.now()
+                    await update_task_status(
+                        task.task_id,
+                        TaskStatus.FAILED,
+                        result=task.result,
+                        error=task.error,
+                    )
+                    print(f"[TaskQueue] Task {task.task_id} failed without automatic replay")
+                    return
+
                 task.status = TaskStatus.COMPLETED
                 task.result = result if isinstance(result, dict) else {"data": result}
                 task.completed_at = datetime.now()
@@ -633,6 +697,8 @@ class TaskQueue:
         "AdsAgent": ("agents.ads_agent.ads_agent", "AdsAgent"),
         "TikTokAgent": ("agents.tiktok_agent.tiktok_agent", "TikTokAgent"),
         "HarnessAgent": ("agents.harness_agent.harness_agent", "HarnessAgent"),
+        "ChatAgent": ("agents.chat_agent.chat_agent", "ChatAgent"),
+        "ChatDeliveryAgent": ("agents.chat_agent.delivery_agent", "ChatDeliveryAgent"),
     }
 
     async def _load_agent_executor(self, agent_name: str) -> Optional[Callable]:
@@ -660,7 +726,7 @@ class TaskQueue:
             db = await get_db_pool()
 
             # HarnessAgent needs harness_manager
-            if agent_name == "HarnessAgent":
+            if agent_name in {"HarnessAgent", "ChatDeliveryAgent"}:
                 from browser_cluster.manager.browser_harness_manager import get_harness_manager
                 harness_mgr = await get_harness_manager()
                 agent = agent_class(browser_manager=browser_manager, db=db, harness_manager=harness_mgr)

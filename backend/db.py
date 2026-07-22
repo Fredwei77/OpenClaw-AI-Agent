@@ -5,6 +5,7 @@ import asyncpg
 from typing import List, Dict, Optional
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from email_utils import sanitize_lead_email
 
 load_dotenv(os.getenv("OPENCLAW_ENV_FILE") or os.path.join(os.path.dirname(__file__), '..', '.env'))
 
@@ -60,6 +61,31 @@ async def ensure_runtime_schema():
     """Apply additive schema upgrades required by local desktop updates."""
     pool = await get_db_pool()
     statements = [
+        """CREATE TABLE IF NOT EXISTS acquisition_tasks (
+               id SERIAL PRIMARY KEY, user_id INT NOT NULL, name VARCHAR(255) NOT NULL,
+               keyword VARCHAR(255) NOT NULL, platforms JSONB NOT NULL DEFAULT '[]'::jsonb,
+               product_context TEXT NOT NULL DEFAULT '', max_results_per_platform INT NOT NULL DEFAULT 25,
+               max_outreach_leads INT NOT NULL DEFAULT 20, approval_mode VARCHAR(20) NOT NULL DEFAULT 'review',
+               delivery_mode VARCHAR(20) NOT NULL DEFAULT 'dry_run', status VARCHAR(20) NOT NULL DEFAULT 'active',
+               next_run_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, interval_hours INT,
+               last_run_at TIMESTAMP, run_count INT NOT NULL DEFAULT 0, last_error TEXT,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS acquisition_task_runs (
+               id SERIAL PRIMARY KEY, task_id INT NOT NULL, user_id INT NOT NULL,
+               status VARCHAR(20) NOT NULL DEFAULT 'running', result JSONB NOT NULL DEFAULT '{}'::jsonb,
+               error TEXT, started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS acquisition_task_run_steps (
+               id SERIAL PRIMARY KEY, run_id INT NOT NULL, step_type VARCHAR(50) NOT NULL,
+               status VARCHAR(20) NOT NULL, input JSONB NOT NULL DEFAULT '{}'::jsonb,
+               output JSONB NOT NULL DEFAULT '{}'::jsonb, error TEXT,
+               started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP
+           )""",
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_tasks_due ON acquisition_tasks(status, next_run_at)",
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_tasks_user_created ON acquisition_tasks(user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_task_runs_task_started ON acquisition_task_runs(task_id, started_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_acquisition_task_steps_run ON acquisition_task_run_steps(run_id, id)",
         """CREATE TABLE IF NOT EXISTS marketing_campaigns (
                id SERIAL PRIMARY KEY,
                user_id INT NOT NULL,
@@ -71,7 +97,127 @@ async def ensure_runtime_schema():
                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
            )""",
         "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS campaign_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS personalization_evidence JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS quality_score INT NOT NULL DEFAULT 0",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS risk_flags JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS generation_provider VARCHAR(50) NOT NULL DEFAULT 'local'",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS generation_model VARCHAR(255) NOT NULL DEFAULT ''",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS approved_by INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS scheduled_at TIMESTAMP",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS sent_at TIMESTAMP",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS provider VARCHAR(50)",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS provider_message_id VARCHAR(255)",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255)",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS last_error TEXT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS delivery_task_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS follow_up_sequence_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS template_version_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS ab_experiment_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS ab_variant_id INT",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS estimated_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0",
+        "ALTER TABLE marketing_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        """CREATE TABLE IF NOT EXISTS marketing_message_events (
+               id SERIAL PRIMARY KEY,
+               message_id INT NOT NULL,
+               user_id INT NOT NULL,
+               event_type VARCHAR(50) NOT NULL,
+               actor_id INT,
+               payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
         "CREATE INDEX IF NOT EXISTS idx_marketing_messages_campaign_id ON marketing_messages(campaign_id)",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_marketing_messages_idempotency
+           ON marketing_messages(idempotency_key) WHERE idempotency_key IS NOT NULL""",
+        """CREATE INDEX IF NOT EXISTS idx_marketing_message_events_message_created
+           ON marketing_message_events(message_id, created_at DESC)""",
+        """CREATE INDEX IF NOT EXISTS idx_marketing_messages_delivery_task
+           ON marketing_messages(delivery_task_id) WHERE delivery_task_id IS NOT NULL""",
+        """CREATE TABLE IF NOT EXISTS follow_up_sequences (
+               id SERIAL PRIMARY KEY,
+               user_id INT NOT NULL,
+               lead_id INT NOT NULL,
+               source_message_id INT NOT NULL,
+               channel VARCHAR(50) NOT NULL,
+               status VARCHAR(30) NOT NULL DEFAULT 'active',
+               stop_on_reply BOOLEAN NOT NULL DEFAULT TRUE,
+               started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               stopped_at TIMESTAMP,
+               stop_reason TEXT,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE INDEX IF NOT EXISTS idx_marketing_messages_follow_up_due
+           ON marketing_messages(status, scheduled_at)
+           WHERE follow_up_sequence_id IS NOT NULL""",
+        """CREATE INDEX IF NOT EXISTS idx_follow_up_sequences_lead_status
+           ON follow_up_sequences(user_id, lead_id, status)""",
+        """CREATE TABLE IF NOT EXISTS message_templates (
+               id SERIAL PRIMARY KEY,
+               user_id INT NOT NULL,
+               name VARCHAR(255) NOT NULL,
+               channel VARCHAR(50) NOT NULL,
+               status VARCHAR(30) NOT NULL DEFAULT 'active',
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS message_template_versions (
+               id SERIAL PRIMARY KEY,
+               template_id INT NOT NULL,
+               user_id INT NOT NULL,
+               version INT NOT NULL,
+               subject TEXT NOT NULL DEFAULT '',
+               body TEXT NOT NULL DEFAULT '',
+               cta TEXT NOT NULL DEFAULT '',
+               prompt TEXT NOT NULL DEFAULT '',
+               model VARCHAR(255) NOT NULL DEFAULT '',
+               status VARCHAR(30) NOT NULL DEFAULT 'active',
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS ab_experiments (
+               id SERIAL PRIMARY KEY,
+               user_id INT NOT NULL,
+               name VARCHAR(255) NOT NULL,
+               campaign_id INT,
+               status VARCHAR(30) NOT NULL DEFAULT 'draft',
+               goal VARCHAR(50) NOT NULL DEFAULT 'reply_rate',
+               traffic_split INT NOT NULL DEFAULT 100,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS ab_variants (
+               id SERIAL PRIMARY KEY,
+               experiment_id INT NOT NULL,
+               user_id INT NOT NULL,
+               label VARCHAR(50) NOT NULL,
+               template_version_id INT NOT NULL,
+               weight INT NOT NULL DEFAULT 1,
+               hypothesis TEXT NOT NULL DEFAULT '',
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE TABLE IF NOT EXISTS prompt_evaluations (
+               id SERIAL PRIMARY KEY,
+               user_id INT NOT NULL,
+               name VARCHAR(255) NOT NULL,
+               prompt TEXT NOT NULL,
+               model VARCHAR(255) NOT NULL DEFAULT '',
+               score INT NOT NULL,
+               criteria JSONB NOT NULL DEFAULT '{}'::jsonb,
+               result JSONB NOT NULL DEFAULT '{}'::jsonb,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+           )""",
+        """CREATE INDEX IF NOT EXISTS idx_message_templates_user_channel
+           ON message_templates(user_id, channel, status)""",
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_message_template_versions_template_version
+           ON message_template_versions(template_id, version)""",
+        """CREATE INDEX IF NOT EXISTS idx_ab_experiments_user_status
+           ON ab_experiments(user_id, status, created_at DESC)""",
+        "CREATE INDEX IF NOT EXISTS idx_ab_variants_experiment ON ab_variants(experiment_id)",
+        """CREATE INDEX IF NOT EXISTS idx_marketing_messages_optimization
+           ON marketing_messages(user_id, template_version_id, ab_variant_id, sent_at)""",
+        """CREATE INDEX IF NOT EXISTS idx_prompt_evaluations_user_created
+           ON prompt_evaluations(user_id, created_at DESC)""",
         "CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_user_created_at ON marketing_campaigns(user_id, created_at DESC)",
         """CREATE TABLE IF NOT EXISTS automation_flows (
                id SERIAL PRIMARY KEY,
@@ -293,14 +439,15 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
         async with pool.acquire() as conn:
             # Use UPSERT (INSERT ... ON CONFLICT DO UPDATE) for deduplication
             query = """
-                INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'new')
+                INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', $8::jsonb)
                 ON CONFLICT (user_id, platform, username)
                 DO UPDATE SET
                     profile_url = EXCLUDED.profile_url,
                     email = COALESCE(EXCLUDED.email, leads.email),
                     followers = EXCLUDED.followers,
                     tags = COALESCE(leads.tags, '{}') || EXCLUDED.tags,
+                    metadata = COALESCE(leads.metadata, '{}'::jsonb) || EXCLUDED.metadata,
                     created_at = CURRENT_TIMESTAMP
             """
 
@@ -310,9 +457,10 @@ async def save_leads(leads: List[Dict], user_id: int = None) -> int:
                     lead.get('platform', ''),
                     lead.get('username', ''),
                     lead.get('profile_url', ''),
-                    lead.get('email', None),
+                    sanitize_lead_email(lead.get('email')),
                     normalize_followers(lead.get('followers', 0)),
-                    lead.get('tags', [])
+                    lead.get('tags', []),
+                    json.dumps(lead.get('metadata') or {}, ensure_ascii=False, default=str)
                 )
                 for lead in leads
             ]
@@ -345,14 +493,15 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
     try:
         async with pool.acquire() as conn:
             query = """
-                INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 'new')
+                INSERT INTO leads (user_id, platform, username, profile_url, email, followers, tags, status, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'new', $8::jsonb)
                 ON CONFLICT (user_id, platform, username)
                 DO UPDATE SET
                     profile_url = EXCLUDED.profile_url,
                     email = COALESCE(EXCLUDED.email, leads.email),
                     followers = GREATEST(EXCLUDED.followers, leads.followers),
-                    tags = COALESCE(leads.tags, '{}') || EXCLUDED.tags
+                    tags = COALESCE(leads.tags, '{}') || EXCLUDED.tags,
+                    metadata = COALESCE(leads.metadata, '{}'::jsonb) || EXCLUDED.metadata
             """
 
             # Convert to tuple list for executemany
@@ -362,9 +511,10 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
                     lead.get('platform', ''),
                     lead.get('username', ''),
                     lead.get('profile_url', ''),
-                    lead.get('email', None),
+                    sanitize_lead_email(lead.get('email')),
                     normalize_followers(lead.get('followers', 0)),
-                    lead.get('tags', [])
+                    lead.get('tags', []),
+                    json.dumps(lead.get('metadata') or {}, ensure_ascii=False, default=str)
                 )
                 for lead in leads
             ]
@@ -384,19 +534,20 @@ async def save_leads_batch(leads: List[Dict], user_id: int = None) -> int:
 async def update_task_status(task_id: int, status: str, result: Dict = None, error: str = None) -> bool:
     """更新任务状态和结果"""
     pool = await get_db_pool()
+    serialized_result = json.dumps(result, ensure_ascii=False, default=str) if result is not None else None
 
     try:
         async with pool.acquire() as conn:
             query = """
                 UPDATE tasks
-                SET status = $2,
-                    result = COALESCE($3, result),
+                SET status = $2::varchar,
+                    result = COALESCE($3::jsonb, result),
                     error = $4,
-                    completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE completed_at END,
-                    started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN CURRENT_TIMESTAMP ELSE started_at END
+                    completed_at = CASE WHEN $2::varchar IN ('completed', 'failed') THEN CURRENT_TIMESTAMP ELSE completed_at END,
+                    started_at = CASE WHEN $2::varchar = 'running' AND started_at IS NULL THEN CURRENT_TIMESTAMP ELSE started_at END
                 WHERE id = $1
             """
-            await conn.execute(query, task_id, status, result, error)
+            await conn.execute(query, task_id, status, serialized_result, error)
             return True
     except Exception as e:
         print(f"[DB Error] Failed to update task {task_id}: {e}")

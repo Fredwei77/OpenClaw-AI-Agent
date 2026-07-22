@@ -39,6 +39,11 @@ class BrowserHarnessManager:
         self.name = name
         self._connected = False
         self._daemon_process = None
+        self._start_lock = asyncio.Lock()
+        if BH_AVAILABLE:
+            # browser-harness helpers otherwise connect to their hard-coded
+            # "default" daemon instead of the named daemon started below.
+            bh.NAME = self.name
 
     async def start(self) -> bool:
         """Start the browser-harness daemon and connect to Chrome."""
@@ -46,32 +51,34 @@ class BrowserHarnessManager:
             logger.error("browser-harness package not available")
             return False
 
-        try:
-            # Check if daemon is already running
-            loop = asyncio.get_running_loop()
-            alive = await loop.run_in_executor(None, ipc.ping, self.name)
-            if alive:
-                logger.info(f"browser-harness daemon '{self.name}' already running")
-                self._connected = True
-                return True
+        async with self._start_lock:
+            try:
+                # Check if daemon is already running
+                loop = asyncio.get_running_loop()
+                alive = await loop.run_in_executor(None, ipc.ping, self.name)
+                if alive:
+                    logger.info(f"browser-harness daemon '{self.name}' already running")
+                    self._connected = True
+                    return True
 
-            # Try to start daemon
-            from browser_harness.admin import ensure_daemon
-            await loop.run_in_executor(None, ensure_daemon)
+                # Try to start daemon
+                from browser_harness.admin import ensure_daemon
+                await loop.run_in_executor(None, lambda: ensure_daemon(name=self.name))
 
-            # Verify connection
-            alive = await loop.run_in_executor(None, ipc.ping, self.name)
-            if alive:
-                self._connected = True
-                logger.info("browser-harness daemon started and connected")
-                return True
+                # Verify connection
+                alive = await loop.run_in_executor(None, ipc.ping, self.name)
+                self._connected = bool(alive)
+                if alive:
+                    logger.info("browser-harness daemon started and connected")
+                    return True
 
-            logger.error("Failed to start browser-harness daemon")
-            return False
+                logger.error("Failed to start browser-harness daemon")
+                return False
 
-        except Exception as e:
-            logger.error(f"Failed to initialize browser-harness: {e}")
-            return False
+            except Exception as e:
+                self._connected = False
+                logger.error(f"Failed to initialize browser-harness: {e}")
+                return False
 
     async def shutdown(self):
         """Shutdown the harness manager."""

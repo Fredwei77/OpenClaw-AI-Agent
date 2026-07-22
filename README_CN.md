@@ -124,6 +124,9 @@ DATABASE_URL=postgresql://postgres:password@localhost:5432/openclaw_db
 ```
 
 ### 第四步：启动服务
+一个命令启动
+powershell -ExecutionPolicy Bypass -File scripts\dev.ps1
+
 ```bash
 # 后端
 cd backend && python main.py

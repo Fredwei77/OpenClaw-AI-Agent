@@ -1,11 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle, RefreshCw, Trash2, Eye, Workflow } from 'lucide-react';
+import { LayoutDashboard, Users, Send, Settings, Search, Activity, Box, BarChart3, Loader2, Sparkles, Terminal, Bot, X, Send as SendIcon, Globe, Blocks, Key, TrendingUp, CheckCircle, RefreshCw, Trash2, Eye, Workflow, Clock, Mail, Download } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import ReactMarkdown from 'react-markdown';
 import AutomationWorkbench from './features/automations/AutomationWorkbench';
 
 // Use environment variable for backend URL if available, default to localhost:8000
 const API_BASE_URL = import.meta.env?.VITE_API_URL || 'http://127.0.0.1:8000';
+const CHAT_DELIVERABLE_CHANNELS = new Set(['email', 'linkedin_dm', 'twitter_dm']);
+const DEFAULT_PRODUCT_CONTEXT = '主营：用户填写；核心优势：用户填写；目标市场：欧美；优先客户：工程分销商、亮化承包商、装修公司；禁止开发：零售商、贸易倒爷、只比价不下单的客户。';
 
 // Decode JWT payload without verifying signature (client-side only)
 function parseJwt(token) {
@@ -28,6 +30,79 @@ function toArray(val) {
   return [];
 }
 
+function stringifyAssetValue(value) {
+  if (value === null || value === undefined) return '';
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ');
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value).trim();
+}
+
+function firstAssetValue(...values) {
+  for (const value of values) {
+    const text = stringifyAssetValue(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function getAssetValue(source, keys) {
+  for (const key of keys) {
+    const value = source?.[key];
+    const text = stringifyAssetValue(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function isBusinessWebsite(url) {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    return !['linkedin.com', 'x.com', 'twitter.com', 'facebook.com', 'instagram.com', 'tiktok.com', 'youtube.com', 'google.com', 'duckduckgo.com'].some(domain => host === domain || host.endsWith(`.${domain}`));
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLeadAsset(lead) {
+  const metadata = lead?.metadata || {};
+  const tags = toArray(lead?.tags);
+  const tagUrl = tags.find(tag => /^https?:\/\//i.test(tag) && isBusinessWebsite(tag));
+  const tagDomain = tags.find(tag => /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(tag) && !tag.includes('@'));
+  const website = firstAssetValue(
+    getAssetValue(metadata, ['website', 'official_website', 'homepage', 'site', 'company_website']),
+    isBusinessWebsite(lead?.profile_url) ? lead.profile_url : ''
+    , tagUrl
+    , tagDomain ? `https://${tagDomain}` : ''
+  );
+  const linkedIn = firstAssetValue(
+    getAssetValue(metadata, ['linkedin', 'linkedin_url', 'linkedin_profile', 'linkedin_company_url']),
+    lead?.platform === 'linkedin' || String(lead?.profile_url || '').includes('linkedin.com') ? lead.profile_url : ''
+  );
+  const companyName = firstAssetValue(
+    getAssetValue(metadata, ['company_name', 'company', 'organization', 'brand', 'store_name', 'title']),
+    lead?.username
+  );
+
+  return {
+    id: lead?.id,
+    raw: lead,
+    companyName,
+    website,
+    founder: firstAssetValue(getAssetValue(metadata, ['founder', 'founders', 'owner', 'ceo'])),
+    linkedIn,
+    email: firstAssetValue(lead?.email, getAssetValue(metadata, ['email', 'contact_email', 'public_email'])),
+    funding: firstAssetValue(getAssetValue(metadata, ['funding', 'funding_status', 'funding_round', 'financing', 'investment'])),
+    employeeSize: firstAssetValue(getAssetValue(metadata, ['employee_size', 'employees', 'employee_count', 'company_size', 'headcount'])),
+    country: firstAssetValue(getAssetValue(metadata, ['country', 'country_code', 'location_country', 'geography', 'location']), tags.find(tag => /^[A-Z]{2}$/i.test(tag))),
+  };
+}
+
+function csvEscape(value) {
+  const text = stringifyAssetValue(value);
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 function isTokenValid(token) {
   if (!token) return false;
   const payload = parseJwt(token);
@@ -36,11 +111,78 @@ function isTokenValid(token) {
   return payload.exp > (Date.now() / 1000) + 60;
 }
 
+function tokenExpiresWithin(token, seconds = 300) {
+  const payload = parseJwt(token);
+  return !payload?.exp || payload.exp <= (Date.now() / 1000) + seconds;
+}
+
+function storeTokenPair(data) {
+  if (data?.access_token) localStorage.setItem('token', data.access_token);
+  if (data?.refresh_token) localStorage.setItem('refresh_token', data.refresh_token);
+}
+
+let refreshPromise = null;
+
+async function refreshSessionToken() {
+  const refreshToken = localStorage.getItem('refresh_token');
+  if (!refreshToken) return null;
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken })
+      });
+      if (!response.ok) {
+        if (response.status === 401) {
+          localStorage.removeItem('token');
+          localStorage.removeItem('refresh_token');
+        }
+        return null;
+      }
+      const data = await response.json();
+      storeTokenPair(data);
+      return data.access_token;
+    } catch {
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
+async function getSessionAccessToken() {
+  const token = localStorage.getItem('token');
+  if (token && !tokenExpiresWithin(token, 300)) return token;
+  const refreshed = await refreshSessionToken();
+  return refreshed || (isTokenValid(token) ? token : null);
+}
+
+async function authenticatedFetch(url, options = {}) {
+  let token = await getSessionAccessToken();
+  const send = (accessToken) => fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {})
+    }
+  });
+  let response = await send(token);
+  if (response.status === 401 && localStorage.getItem('refresh_token')) {
+    token = await refreshSessionToken();
+    if (token) response = await send(token);
+  }
+  return response;
+}
+
 const i18n = {
   en: {
     brand: "OpenClaw AI",
     tabDashboard: "Nexus Overview",
     tabLeads: "Lead Extractor",
+    tabChatAgent: "Chat Agent",
     tabMarketing: "Marketing Engine",
     tabAnalytics: "Growth Analytics",
     tabPlugins: "Plugin Ecosystem",
@@ -225,10 +367,19 @@ function App() {
   const [leads, setLeads] = useState([]);
   const [statusMsg, setStatusMsg] = useState('');
   const [leadsLoading, setLeadsLoading] = useState(false);
+  const [assetEnriching, setAssetEnriching] = useState(false);
   const [leadsSearch, setLeadsSearch] = useState('');
+  const [activeLeadTag, setActiveLeadTag] = useState('');
   const [leadStatusFilter, setLeadStatusFilter] = useState('');
+  const [leadEmailFilter, setLeadEmailFilter] = useState('');
   const [leadTotal, setLeadTotal] = useState(0);
   const [leadDetails, setLeadDetails] = useState(null);
+  const [deletingLeadIds, setDeletingLeadIds] = useState(() => new Set());
+  const [chatProductContext, setChatProductContext] = useState(DEFAULT_PRODUCT_CONTEXT);
+  const [chatAutoSend, setChatAutoSend] = useState(false);
+  const [chatMinQuality, setChatMinQuality] = useState(80);
+  const [chatGenerationBusy, setChatGenerationBusy] = useState(false);
+  const [chatAutomationReport, setChatAutomationReport] = useState(null);
 
   // Auth State
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -257,6 +408,56 @@ function App() {
   // i18n Language State
   const [lang, setLang] = useState('zh');
   const t = i18n[lang];
+  const emailReadyLeads = leads.filter(lead => Boolean(lead.email));
+  const emailMissingLeads = leads.filter(lead => !lead.email);
+  const displayedLeads = leadEmailFilter === 'with_email'
+    ? emailReadyLeads
+    : leadEmailFilter === 'without_email'
+      ? emailMissingLeads
+      : leads;
+  // Keep newly scraped social profiles visible even before public assets are found.
+  const displayedLeadAssets = displayedLeads.map(normalizeLeadAsset);
+  const leadAssetLabels = lang === 'zh'
+    ? {
+        title: '线索信息资产',
+        search: '搜索公司、官网、邮箱或 LinkedIn',
+        allStatuses: '全部状态',
+        allEmails: '全部邮箱',
+        hasEmail: '有邮箱',
+        noEmail: '无邮箱',
+        enrich: '补全资产',
+        download: '下载表格',
+        companyName: '公司名称',
+        website: '官网',
+        founder: '创始人',
+        linkedIn: 'LinkedIn',
+        email: '邮箱',
+        funding: '融资情况',
+        employeeSize: '员工规模',
+        country: '国家',
+        status: '状态',
+        actions: '操作',
+      }
+    : {
+        title: 'Lead Information Assets',
+        search: 'Search company, website, email, or LinkedIn',
+        allStatuses: 'All statuses',
+        allEmails: 'All emails',
+        hasEmail: 'Has email',
+        noEmail: 'No email',
+        enrich: 'Enrich Assets',
+        download: 'Download CSV',
+        companyName: 'Company',
+        website: 'Website',
+        founder: 'Founder',
+        linkedIn: 'LinkedIn',
+        email: 'Email',
+        funding: 'Funding',
+        employeeSize: 'Employees',
+        country: 'Country',
+        status: 'Status',
+        actions: 'Actions',
+      };
 
   // AI Assistant State
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
@@ -374,6 +575,7 @@ function App() {
 
   // Analytics State (from backend)
   const [analyticsData, setAnalyticsData] = useState(null);
+  const [optimizationData, setOptimizationData] = useState(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState('');
 
@@ -382,21 +584,13 @@ function App() {
     setAnalyticsLoading(true);
     setAnalyticsError('');
     try {
-      const token = localStorage.getItem('token');
-      if (!isTokenValid(token)) {
-        if (token) localStorage.removeItem('token');
-        setIsLoggedIn(false);
-        setUser(null);
+      const token = await getSessionAccessToken();
+      if (!token) {
         setAnalyticsError(lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again');
         return;
       }
-      const response = await fetch(`${API_BASE_URL}/api/analytics/`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/analytics/`);
       if (response.status === 401) {
-        localStorage.removeItem('token');
-        setIsLoggedIn(false);
-        setUser(null);
         setAnalyticsError(lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again');
         return;
       }
@@ -405,6 +599,12 @@ function App() {
         setAnalyticsError(data.error || 'Failed to load analytics');
       } else {
         setAnalyticsData(data);
+        try {
+          const optimizationResponse = await authenticatedFetch(`${API_BASE_URL}/api/optimization/summary?days=30`);
+          if (optimizationResponse.ok) setOptimizationData(await optimizationResponse.json());
+        } catch {
+          setOptimizationData(null);
+        }
       }
     } catch {
       setAnalyticsError(lang === 'zh' ? '网络错误' : 'Network error');
@@ -414,14 +614,12 @@ function App() {
   }, [lang]);
 
   const fetchSystemStatus = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    if (!isTokenValid(token)) return;
+    const token = await getSessionAccessToken();
+    if (!token) return;
     setSystemStatusLoading(true);
     setSystemStatusError('');
     try {
-      const response = await fetch(`${API_BASE_URL}/api/system/status`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/system/status`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || data.detail || 'Failed to load runtime status');
       setSystemStatus(data);
@@ -433,14 +631,12 @@ function App() {
   }, [lang]);
 
   const fetchMarketingCampaigns = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    if (!isTokenValid(token)) return;
+    const token = await getSessionAccessToken();
+    if (!token) return;
     setCampaignsLoading(true);
     setCampaignsError('');
     try {
-      const response = await fetch(`${API_BASE_URL}/api/outreach/campaigns?limit=10`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/outreach/campaigns?limit=10`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || data.detail || 'Failed to load campaigns');
       setMarketingCampaigns(data.campaigns || []);
@@ -453,17 +649,23 @@ function App() {
 
   // Check auth status on mount — client-side JWT expiry check (no network request)
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    if (isTokenValid(token)) {
-      const payload = parseJwt(token);
-      setIsLoggedIn(true);
-      if (payload?.email) setUser({ email: payload.email });
-    } else {
-      if (token) localStorage.removeItem('token');
-      setIsLoggedIn(false);
-      setUser(null);
-    }
-    setAuthLoading(false);
+    let cancelled = false;
+    const restoreSession = async () => {
+      const token = await getSessionAccessToken();
+      const cachedToken = token || localStorage.getItem('token');
+      const payload = parseJwt(cachedToken);
+      const hasRefreshToken = Boolean(localStorage.getItem('refresh_token'));
+      if (!cancelled && payload && (token || hasRefreshToken)) {
+        setIsLoggedIn(true);
+        if (payload.email) setUser({ email: payload.email });
+      } else if (!cancelled) {
+        setIsLoggedIn(false);
+        setUser(null);
+      }
+      if (!cancelled) setAuthLoading(false);
+    };
+    restoreSession();
+    return () => { cancelled = true; };
   }, []);
 
   const handleLogin = async (e) => {
@@ -479,7 +681,7 @@ function App() {
       if (!response.ok) {
         throw new Error(data.error || 'Login failed');
       }
-      localStorage.setItem('token', data.access_token);
+      storeTokenPair(data);
       setIsLoggedIn(true);
       setUser({ email: loginEmail });
       setLoginEmail('');
@@ -512,7 +714,7 @@ function App() {
       if (!loginRes.ok) {
         throw new Error(loginData.error || 'Registration succeeded but login failed');
       }
-      localStorage.setItem('token', loginData.access_token);
+      storeTokenPair(loginData);
       setIsLoggedIn(true);
       setUser({ email: loginEmail });
       setLoginEmail('');
@@ -526,44 +728,139 @@ function App() {
 
   const handleLogout = () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('refresh_token');
     setIsLoggedIn(false);
     setUser(null);
     setLeads([]);
     setAnalyticsData(null);
+    setOptimizationData(null);
     setSystemStatus(null);
     setMarketingCampaigns([]);
     setLeadDetails(null);
   };
 
-  const fetchLeads = useCallback(async () => {
-    const token = localStorage.getItem('token');
-    if (!isTokenValid(token)) return;
+  const fetchLeads = useCallback(async (tagOverride) => {
+    const token = await getSessionAccessToken();
+    if (!token) return;
     setLeadsLoading(true);
     try {
-      const params = new URLSearchParams({ page_size: '100' });
+      const params = new URLSearchParams({ page_size: '200' });
+      const scopedTag = typeof tagOverride === 'string' ? tagOverride : activeLeadTag;
+      if (scopedTag.trim()) params.set('tags', scopedTag.trim());
       if (leadsSearch.trim()) params.set('search', leadsSearch.trim());
       if (leadStatusFilter) params.set('status', leadStatusFilter);
-      const response = await fetch(`${API_BASE_URL}/api/leads/?${params}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/leads/?${params}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Failed to load leads');
-      setLeads(data.leads || []);
+      const nextLeads = data.leads || [];
+      setLeads(nextLeads);
+      setLeadDetails(prev => (prev && !nextLeads.some(lead => lead.id === prev.id) ? null : prev));
       setLeadTotal(data.total || 0);
     } catch (err) {
       setStatusMsg(`[Error] ${err.message || 'Failed to load leads'}`);
     } finally {
       setLeadsLoading(false);
     }
-  }, [leadStatusFilter, leadsSearch]);
+  }, [activeLeadTag, leadStatusFilter, leadsSearch]);
 
-  const fetchLeadDetails = async (leadId) => {
-    const token = localStorage.getItem('token');
+  const downloadLeadAssets = () => {
+    if (!displayedLeadAssets.length) return;
+    const headers = [
+      leadAssetLabels.companyName,
+      leadAssetLabels.website,
+      leadAssetLabels.founder,
+      leadAssetLabels.linkedIn,
+      leadAssetLabels.email,
+      leadAssetLabels.funding,
+      leadAssetLabels.employeeSize,
+      leadAssetLabels.country,
+    ];
+    const rows = displayedLeadAssets.map(asset => [
+      asset.companyName,
+      asset.website,
+      asset.founder,
+      asset.linkedIn,
+      asset.email,
+      asset.funding,
+      asset.employeeSize,
+      asset.country,
+    ]);
+    const csv = [headers, ...rows].map(row => row.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `openclaw-lead-assets-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setStatusMsg(lang === 'zh' ? `[信息资产] 已导出 ${displayedLeadAssets.length} 条结构化线索。` : `[Lead assets] Exported ${displayedLeadAssets.length} structured leads.`);
+  };
+
+  const enrichLeadAssets = async () => {
+    if (!displayedLeads.length || assetEnriching) return;
+    const currentPlatform = String(platform || 'all').toLowerCase();
+    const hasSelectedPlatformRows = displayedLeads.some(lead => {
+      const leadPlatform = String(lead?.platform || '').toLowerCase();
+      return currentPlatform === 'all'
+        || (currentPlatform === 'x' || currentPlatform === 'twitter'
+          ? leadPlatform === 'x' || leadPlatform === 'twitter'
+          : leadPlatform === currentPlatform);
+    });
+    const scopedLeads = displayedLeads.filter(lead => {
+      const leadPlatform = String(lead?.platform || '').toLowerCase();
+      // A failed social scrape can return a public-search fallback. In that case
+      // the selected platform no longer matches the displayed rows, so enrich the
+      // displayed rows by id rather than silently targeting a different dataset.
+      if (currentPlatform === 'all' || !hasSelectedPlatformRows) return true;
+      if (currentPlatform === 'x' || currentPlatform === 'twitter') return leadPlatform === 'x' || leadPlatform === 'twitter';
+      return leadPlatform === currentPlatform;
+    });
+    const leadIds = scopedLeads.map(lead => lead.id).filter(Boolean).slice(0, 25);
+    setAssetEnriching(true);
+    setStatusMsg(lang === 'zh' ? '[信息资产] 正在按外贸开发规则补全官网、邮箱、LinkedIn 和客户分层...' : '[Lead assets] Enriching website, email, LinkedIn, and fit tier...');
     try {
-      const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/enrich-assets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lead_ids: leadIds,
+          keyword,
+          platform,
+          limit: Math.max(1, leadIds.length || 25),
+        }),
       });
       const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || data.error || 'Failed to enrich lead assets');
+      await fetchLeads();
+      const added = data.fields_added || {};
+      const created = data.created_fields_found || {};
+      const createdAssets = data.created_assets || 0;
+      const noNewFields = ['website', 'email', 'linkedin_url', 'country'].every(field => !added[field]);
+      const debug = data.debug || {};
+      setStatusMsg(lang === 'zh'
+        ? `[信息资产] 已补全 ${data.enriched || 0} 条线索：官网 +${added.website || 0}，邮箱 +${added.email || data.emails_found || 0}，LinkedIn +${added.linkedin_url || 0}，国家 +${added.country || 0}；主动新增官网公司 ${createdAssets} 条（官网 ${created.website || 0}，邮箱 ${created.email || 0}）。规则版本 ${data.rules_version || '-'}.${noNewFields && !createdAssets ? ` 未新增字段：${debug.social_profiles || 0} 条社媒线索未公开官网/邮箱或搜索未命中。` : ''}`
+        : `[Lead assets] Enriched ${data.enriched || 0} leads: website +${added.website || 0}, email +${added.email || data.emails_found || 0}, LinkedIn +${added.linkedin_url || 0}, country +${added.country || 0}; created ${createdAssets} company assets (website ${created.website || 0}, email ${created.email || 0}). Rules ${data.rules_version || '-'}.${noNewFields && !createdAssets ? ` No new fields: ${debug.social_profiles || 0} social leads had no public site/email or search hit.` : ''}`);
+    } catch (err) {
+      setStatusMsg(`[Error] ${err.message || 'Failed to enrich lead assets'}`);
+    } finally {
+      setAssetEnriching(false);
+    }
+  };
+
+  const fetchLeadDetails = async (leadId) => {
+    if (!leadId || deletingLeadIds.has(leadId)) return;
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/leads/${leadId}`);
+      const data = await response.json();
+      if (response.status === 404) {
+        setLeads(prev => prev.filter(lead => lead.id !== leadId));
+        setDeletingLeadIds(prev => new Set(prev).add(leadId));
+        setLeadDetails(prev => (prev?.id === leadId ? null : prev));
+        setStatusMsg(lang === 'zh' ? '[线索] 当前线索不存在或已不属于此账号，已清除详情面板。' : '[Lead] This lead no longer exists or is not owned by this account.');
+        return;
+      }
       if (!response.ok) throw new Error(data.error || 'Failed to load lead details');
       setLeadDetails(data);
     } catch (err) {
@@ -572,10 +869,9 @@ function App() {
   };
 
   const updateLeadStatus = async (leadId, status) => {
-    const token = localStorage.getItem('token');
-    const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
+    const response = await authenticatedFetch(`${API_BASE_URL}/api/leads/${leadId}`, {
       method: 'PATCH',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status })
     });
     const data = await response.json();
@@ -588,25 +884,33 @@ function App() {
   };
 
   const deleteLead = async (leadId) => {
-    const token = localStorage.getItem('token');
-    const response = await fetch(`${API_BASE_URL}/api/leads/${leadId}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${token}` }
-    });
-    if (!response.ok) {
-      const data = await response.json();
-      setStatusMsg(`[Error] ${data.error || 'Failed to delete lead'}`);
-      return;
+    if (!leadId || deletingLeadIds.has(leadId)) return;
+    setDeletingLeadIds(prev => new Set(prev).add(leadId));
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/leads/${leadId}`, {
+        method: 'DELETE',
+      });
+      if (!response.ok && response.status !== 404) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to delete lead');
+      }
+      setLeads(prev => prev.filter(lead => lead.id !== leadId));
+      setLeadDetails(prev => prev?.id === leadId ? null : prev);
+      await fetchLeads();
+    } catch (err) {
+      setDeletingLeadIds(prev => {
+        const next = new Set(prev);
+        next.delete(leadId);
+        return next;
+      });
+      setStatusMsg(`[Error] ${err.message || 'Failed to delete lead'}`);
     }
-    setLeadDetails(prev => prev?.id === leadId ? null : prev);
-    await fetchLeads();
   };
 
   const updateDraftStatus = async (messageId, status) => {
-    const token = localStorage.getItem('token');
-    const response = await fetch(`${API_BASE_URL}/api/outreach/${messageId}`, {
+    const response = await authenticatedFetch(`${API_BASE_URL}/api/outreach/${messageId}`, {
       method: 'PATCH',
-      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status })
     });
     const data = await response.json();
@@ -620,9 +924,203 @@ function App() {
     }));
   };
 
+  const updateChatDraftLocal = (messageId, field, value) => {
+    setLeadDetails(prev => ({
+      ...prev,
+      marketing_messages: prev.marketing_messages.map(message => (
+        message.id === messageId ? { ...message, [field]: value } : message
+      ))
+    }));
+  };
+
+  const generateChatDrafts = async (leadId, options = {}) => {
+    const token = await getSessionAccessToken();
+    if (!token) {
+      setStatusMsg('[Error] Session unavailable');
+      return;
+    }
+    const language = options.language || (activeTab === 'chat' ? 'en' : lang);
+    const productContext = options.productContext ?? (activeTab === 'chat' ? chatProductContext : '');
+    const autoSend = options.autoSend ?? (activeTab === 'chat' && chatAutoSend);
+    if (activeTab === 'chat') {
+      setChatGenerationBusy(true);
+      setChatAutomationReport(null);
+    }
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/chat/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lead_ids: [leadId], product_context: productContext, language })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail?.message || data.detail || data.error || 'Draft generation failed';
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      }
+      if (autoSend) {
+        const report = { sent: 0, queued: 0, skipped: 0, failed: 0 };
+        for (const message of data.messages || []) {
+          if (!CHAT_DELIVERABLE_CHANNELS.has(message.channel) || (message.quality_score || 0) < chatMinQuality || (message.risk_flags || []).length > 0) {
+            report.skipped += 1;
+            continue;
+          }
+          try {
+            const approveResponse = await authenticatedFetch(`${API_BASE_URL}/api/chat/messages/${message.id}/approve`, {
+              method: 'POST',
+            });
+            const approved = await approveResponse.json();
+            if (!approveResponse.ok) throw new Error(approved.detail?.message || approved.detail || 'Approval failed');
+            const sendResponse = await authenticatedFetch(`${API_BASE_URL}/api/chat/messages/${message.id}/send`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ provider: 'auto', dry_run: false })
+            });
+            const sent = await sendResponse.json();
+            if (!sendResponse.ok) throw new Error(sent.detail?.message || sent.detail || 'Delivery failed');
+            if (sent.status === 'queued') report.queued += 1;
+            else report.sent += 1;
+          } catch {
+            report.failed += 1;
+          }
+        }
+        setChatAutomationReport(report);
+        setStatusMsg(`[Chat Agent] Auto delivery: ${report.sent} sent, ${report.queued} queued, ${report.skipped} skipped, ${report.failed} failed`);
+      } else {
+        setStatusMsg(`[Chat Agent] ${data.total} English draft(s) generated`);
+      }
+      await fetchLeadDetails(leadId);
+      if (autoSend) setTimeout(() => fetchLeadDetails(leadId), 1800);
+    } catch (error) {
+      setStatusMsg(`[Error] ${error.message}`);
+    } finally {
+      if (activeTab === 'chat') setChatGenerationBusy(false);
+    }
+  };
+
+  const waitForChatDelivery = async (taskId, leadId) => {
+    if (!taskId) return null;
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/tasks/${taskId}`);
+      const task = await response.json();
+      if (!response.ok) {
+        const detail = task.detail?.message || task.detail || 'Could not read delivery status';
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      }
+      if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+        await fetchLeadDetails(leadId);
+        if (task.status !== 'completed') {
+          throw new Error(task.error || task.result?.message || `Delivery ${task.status}`);
+        }
+        return task;
+      }
+    }
+    await fetchLeadDetails(leadId);
+    throw new Error('Delivery is still running after 60 seconds; check the task status and browser session');
+  };
+
+  const runChatMessageAction = async (message, action) => {
+    const requests = {
+      save: {
+        method: 'PATCH',
+        body: JSON.stringify({ subject: message.subject || '', body: message.body, cta: message.cta || '' })
+      },
+      regenerate: {
+        method: 'POST',
+        body: JSON.stringify({
+          product_context: activeTab === 'chat' ? chatProductContext : '',
+          language: activeTab === 'chat' ? 'en' : lang
+        })
+      },
+      approve: { method: 'POST' },
+      send: { method: 'POST', body: JSON.stringify({ provider: 'auto', dry_run: false }) },
+      dryRun: { method: 'POST', body: JSON.stringify({ provider: 'social', dry_run: true }) }
+    };
+    const config = requests[action];
+    const suffix = action === 'save' ? '' : (action === 'dryRun' ? '/send' : `/${action}`);
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/chat/messages/${message.id}${suffix}`, {
+        method: config.method,
+        headers: {
+          ...(config.body ? { 'Content-Type': 'application/json' } : {})
+        },
+        ...(config.body ? { body: config.body } : {})
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail?.message || data.detail || data.error || 'Chat Agent action failed';
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      }
+      setLeadDetails(prev => ({
+        ...prev,
+        marketing_messages: prev.marketing_messages.map(item => item.id === message.id ? data : item)
+      }));
+      setStatusMsg(`[Chat Agent] ${action} completed`);
+      if (action === 'send' || action === 'dryRun') {
+        setStatusMsg(`[Chat Agent] Delivery queued (task #${data.delivery_task_id || 'pending'})`);
+        await waitForChatDelivery(data.delivery_task_id, leadDetails.id);
+        setStatusMsg(`[Chat Agent] ${action === 'dryRun' ? 'Dry Run' : 'Delivery'} completed`);
+      }
+    } catch (error) {
+      setStatusMsg(`[Error] ${error.message}`);
+      if (action === 'send') await fetchLeadDetails(leadDetails.id);
+    }
+  };
+
+  const startFollowUps = async (message) => {
+    try {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/chat/messages/${message.id}/follow-ups`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delays_hours: [72, 168], language: lang, stop_on_reply: true })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        const detail = data.detail?.message || data.detail || data.error || 'Failed to start follow-ups';
+        throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+      }
+      await fetchLeadDetails(leadDetails.id);
+      setStatusMsg(`[Chat Agent] Follow-up sequence #${data.id} scheduled`);
+    } catch (error) {
+      setStatusMsg(`[Error] ${error.message}`);
+    }
+  };
+
+  const openEmailWorkflow = async (lead = emailReadyLeads[0]) => {
+    if (!lead?.email) {
+      setStatusMsg(lang === 'zh' ? '[邮件开发] 当前没有抓到公开邮箱的线索，请先切换关键词或目标客户类型重新抓取。' : '[Email outreach] No public email found yet. Refine the keyword or target customer type and scrape again.');
+      return;
+    }
+    setActiveTab('chat');
+    setChatProductContext(prev => prev?.trim() ? prev : DEFAULT_PRODUCT_CONTEXT);
+    await fetchLeadDetails(lead.id);
+    setStatusMsg(lang === 'zh'
+      ? `[邮件开发] 已选择 ${lead.email}。下一步：生成英文草稿 -> 审批 -> 发送 -> 启动第 3/7/14 天跟进。`
+      : `[Email outreach] Selected ${lead.email}. Next: generate English draft -> approve -> send -> start day 3/7/14 follow-ups.`);
+  };
+
   useEffect(() => {
     if (isLoggedIn) fetchLeads();
   }, [isLoggedIn, fetchLeads]);
+
+  useEffect(() => {
+    if (!isLoggedIn) return undefined;
+    const renewSession = () => {
+      const token = localStorage.getItem('token');
+      if (!token || tokenExpiresWithin(token, 300)) refreshSessionToken();
+    };
+    renewSession();
+    const interval = setInterval(renewSession, 60000);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') renewSession();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [isLoggedIn]);
 
   // Dashboard and analytics share the persisted workspace summary.
   useEffect(() => {
@@ -672,13 +1170,13 @@ function App() {
     setStatusMsg(`${t.sysInit}${platform}...`);
 
     try {
-      const token = localStorage.getItem('token');
+      const token = await getSessionAccessToken();
       if (!token) {
         setStatusMsg(lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first');
         return;
       }
       // Call the actual scraping endpoint using LeadAgent
-      const response = await fetch(
+      const response = await authenticatedFetch(
         `${API_BASE_URL}/api/agents/test-scraper`,
         {
           method: 'POST',
@@ -698,9 +1196,6 @@ function App() {
       );
 
       if (response.status === 401) {
-        localStorage.removeItem('token');
-        setIsLoggedIn(false);
-        setUser(null);
         setStatusMsg(lang === 'zh' ? '[错误] 登录已过期，请重新登录' : '[Error] Session expired, please log in again');
         return;
       }
@@ -714,22 +1209,85 @@ function App() {
       if (result.status === 'success' && result.data && result.data.length > 0) {
         let sourceInfo = '';
         if (result.source) {
-          if (result.source.includes('+ddg')) sourceInfo = lang === 'zh' ? ' (通过 DuckDuckGo 搜索)' : ' (via DuckDuckGo)';
+          if (result.source.includes('+public_search')) sourceInfo = lang === 'zh' ? '（平台公开索引回退）' : ' (via public platform index)';
+          else if (result.source.includes('+ddg')) sourceInfo = lang === 'zh' ? ' (通过 DuckDuckGo 搜索)' : ' (via DuckDuckGo)';
           else if (result.source.includes('+google')) sourceInfo = lang === 'zh' ? ' (通过 Google 搜索)' : ' (via Google)';
         }
-        setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".${sourceInfo}`);
-        await fetchLeads();
+        const emailInfo = result.emails_found
+          ? (lang === 'zh' ? ` 邮箱 ${result.emails_found}` : `, emails ${result.emails_found}`)
+          : '';
+        const assetInfo = result.company_assets_found
+          ? (lang === 'zh' ? ` 官网公司 ${result.company_assets_found}` : `, company assets ${result.company_assets_found}`)
+          : '';
+        const droppedInfo = result.empty_social_dropped
+          ? (lang === 'zh' ? ` 已过滤空社媒 ${result.empty_social_dropped}` : `, filtered empty social ${result.empty_social_dropped}`)
+          : '';
+        setStatusMsg(`${t.sysSuccess}${result.leads_found}${t.sysSuccessEnd}"${keyword}".${sourceInfo}${emailInfo}${assetInfo}${droppedInfo}`);
+        const currentKeywordTag = keyword.trim();
+        setActiveLeadTag(currentKeywordTag);
+        await fetchLeads(currentKeywordTag);
       } else if (result.status === 'error') {
         setStatusMsg(lang === 'zh' ? `[错误] 爬取失败: ${result.message}` : `[Error] Scraping failed: ${result.message}`);
       } else {
         // 真实爬取结果为空
-        const reason = platform === 'x' || platform === 'twitter' || platform === 'linkedin' || platform === 'instagram' || platform === 'facebook'
+        const diagnosticReason = result.diagnostics?.reason;
+        const reason = diagnosticReason === 'login_required'
+          ? (lang === 'zh' ? `${platform} 要求有效登录态，请在调试 Chrome 中重新登录后重试。` : `${platform} requires an active browser login. Sign in through the debug Chrome profile and retry.`)
+          : diagnosticReason === 'filtered_by_targeting'
+            ? (lang === 'zh' ? `已解析到资料，但未通过地区、粉丝规模或账号类型筛选；请放宽筛选条件。` : `Profiles were parsed but removed by geography, follower, or account-type filters. Broaden the filters and retry.`)
+            : diagnosticReason === 'no_matching_profiles'
+              ? (lang === 'zh' ? `未找到同时匹配「${keyword}」完整关键词的 ${platform} 资料；可尝试更具体的行业词或切换 LinkedIn/Shopify。` : `No ${platform} profiles matched every meaningful term in "${keyword}". Try a more specific industry term or LinkedIn/Shopify.`)
+              : platform === 'x' || platform === 'twitter' || platform === 'linkedin' || platform === 'instagram' || platform === 'facebook'
           ? (lang === 'zh'
-            ? `${platform} 需要登录才能搜索。请先用 Chrome 浏览器登录 ${platform}，然后重启应用重试。若仍失败，可在 .env 中手动配置 CHROME_USER_DATA_DIR 或 CDP_URL`
-            : `${platform} requires login. Log in to ${platform} in Chrome first, then restart the app. If it still fails, set CHROME_USER_DATA_DIR or CDP_URL in .env`)
+            ? `${platform} 未返回可解析线索。请确认 Chrome 登录态、CDP_URL/CHROME_USER_DATA_DIR 配置、搜索结果页是否被限流或页面结构变化。`
+            : `${platform} returned no parseable leads. Check Chrome login state, CDP_URL/CHROME_USER_DATA_DIR, rate limits, or page markup changes.`)
           : (lang === 'zh' ? `未找到匹配「${keyword}」的线索` : `No leads found for "${keyword}"`);
         setStatusMsg(`[!] ${reason}`);
       }
+    } catch (err) {
+      console.error(err);
+      setStatusMsg(t.sysErrorNet);
+    } finally {
+      setIsScraping(false);
+    }
+  };
+
+  const handleAcquisitionPipeline = async () => {
+    if (!keyword.trim()) {
+      setStatusMsg(lang === 'zh' ? '[错误] 请输入关键词' : '[Error] Please enter a keyword');
+      return;
+    }
+    setIsScraping(true);
+    setStatusMsg(lang === 'zh' ? '[获客管道] 正在搜索、沉淀线索并生成邮件草稿...' : '[Acquisition] Searching, saving leads, and drafting emails...');
+    try {
+      const token = await getSessionAccessToken();
+      if (!token) {
+        setStatusMsg(lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first');
+        return;
+      }
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/acquisition-pipeline`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          keyword: keyword.trim(),
+          platforms: [{ platform: platform || 'x', priority: 3 }],
+          max_results_per_platform: maxResults,
+          product_context: keyword.trim()
+        })
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const result = await response.json();
+      const ready = result.email_ready_lead_ids?.length || 0;
+      const campaignId = result.outreach?.summary?.campaign_id;
+      const draftCount = result.outreach?.summary?.messages_generated || 0;
+      setActiveLeadTag(keyword.trim());
+      await Promise.all([fetchLeads(keyword.trim()), fetchMarketingCampaigns()]);
+      setStatusMsg(campaignId
+        ? (lang === 'zh' ? `[获客管道] 已沉淀 ${result.assets_persisted} 条线索，${ready} 条邮箱线索生成 ${draftCount} 条待审核草稿（活动 #${campaignId}）。请前往“AI 获客自动化 → 待审核外联”。` : `[Acquisition] Saved ${result.assets_persisted} leads and generated ${draftCount} drafts for ${ready} email-ready leads (campaign #${campaignId}). Open AI Lead Automation → Outreach review.`)
+        : (lang === 'zh' ? `[获客管道] 已沉淀 ${result.assets_persisted} 条线索，但未找到公开邮箱；请调整关键词后重试。` : `[Acquisition] Saved ${result.assets_persisted} leads, but found no public email. Refine the keyword and retry.`));
     } catch (err) {
       console.error(err);
       setStatusMsg(t.sysErrorNet);
@@ -750,8 +1308,8 @@ function App() {
     setMarketingActionTitle(titles[type]);
 
     try {
-      const token = localStorage.getItem('token');
-      if (!isTokenValid(token)) {
+      const token = await getSessionAccessToken();
+      if (!token) {
         setMarketingResult(lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first');
         return;
       }
@@ -759,7 +1317,7 @@ function App() {
         setMarketingResult(lang === 'zh' ? '[错误] 请先在线索捕获器中采集线索。' : '[Error] Extract leads before running a marketing action.');
         return;
       }
-      const response = await fetch(`${API_BASE_URL}/api/agents/marketing-action`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/marketing-action`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -788,8 +1346,8 @@ function App() {
   const handlePipelineAction = async () => {
     if (pipelineLoading) return;
 
-    const token = localStorage.getItem('token');
-    if (!isTokenValid(token)) {
+    const token = await getSessionAccessToken();
+    if (!token) {
       setPipelineResult({ error: lang === 'zh' ? '请先登录' : 'Please log in first' });
       return;
     }
@@ -804,7 +1362,7 @@ function App() {
     setPipelineStep('research');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/agents/marketing-pipeline`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/marketing-pipeline`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -813,14 +1371,13 @@ function App() {
         body: JSON.stringify({
           lead_ids: leads.slice(0, 20).map(lead => lead.id),
           product_context: keyword || '',
-          language: lang === 'zh' ? 'zh' : 'en'
+          // Pipeline outreach is customer-facing copy for cross-border leads,
+          // so keep generated messages in English regardless of UI language.
+          language: 'en'
         })
       });
 
       if (response.status === 401) {
-        localStorage.removeItem('token');
-        setIsLoggedIn(false);
-        setUser(null);
         setPipelineResult({ error: lang === 'zh' ? '登录已过期，请重新登录' : 'Session expired, please log in again' });
         return;
       }
@@ -845,8 +1402,8 @@ function App() {
   const handleRunSkill = async (skillId) => {
     if (skillRunning) return;
 
-    const token = localStorage.getItem('token');
-    if (!isTokenValid(token)) {
+    const token = await getSessionAccessToken();
+    if (!token) {
       setSkillResult({ skill_id: skillId, error: t.skillLoginRequired });
       return;
     }
@@ -860,7 +1417,7 @@ function App() {
     setSkillResult(null);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/agents/execute-skill`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/execute-skill`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -874,9 +1431,6 @@ function App() {
       });
 
       if (response.status === 401) {
-        localStorage.removeItem('token');
-        setIsLoggedIn(false);
-        setUser(null);
         setSkillResult({ skill_id: skillId, error: t.skillLoginRequired });
         return;
       }
@@ -903,12 +1457,12 @@ function App() {
     setIsTyping(true);
 
     try {
-      const token = localStorage.getItem('token');
+      const token = await getSessionAccessToken();
       if (!token) {
         setChatMessages(prev => [...prev, { role: 'assistant', content: lang === 'zh' ? '[错误] 请先登录' : '[Error] Please log in first' }]);
         return;
       }
-      const response = await fetch(`${API_BASE_URL}/api/agents/test-llm`, {
+      const response = await authenticatedFetch(`${API_BASE_URL}/api/agents/test-llm`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -1069,6 +1623,10 @@ function App() {
           <Users size={20} />
           {t.tabLeads}
         </div>
+        <div className={`nav-link ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
+          <Bot size={20} />
+          {lang === 'zh' ? 'Chat Agent' : t.tabChatAgent}
+        </div>
         <div className={`nav-link ${activeTab === 'marketing' ? 'active' : ''}`} onClick={() => setActiveTab('marketing')}>
           <Send size={20} />
           {t.tabMarketing}
@@ -1101,6 +1659,7 @@ function App() {
           <h1 className="page-title">
             {activeTab === 'dashboard' ? t.headerDashboard : 
              activeTab === 'leads' ? t.headerLeads :
+             activeTab === 'chat' ? (lang === 'zh' ? 'Chat Agent' : t.tabChatAgent) :
              activeTab === 'marketing' ? t.tabMarketing :
              activeTab === 'automations' ? (lang === 'zh' ? 'AI 获客自动化' : 'AI Lead Automation') :
              activeTab === 'plugins' ? t.tabPlugins :
@@ -1377,6 +1936,10 @@ function App() {
                       {isScraping ? <Loader2 size={16} className="loading-spinner" /> : <Search size={16} />}
                       {isScraping ? (lang === 'zh' ? '挖掘中...' : 'Mining...') : (lang === 'zh' ? '部署提取器' : 'Deploy Extractor')}
                     </button>
+                    <button className="btn" onClick={handleAcquisitionPipeline} disabled={isScraping} style={{ minWidth: '180px', padding: '0 1.5rem', gap: '0.5rem', background: 'rgba(16,185,129,0.16)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.35)', fontWeight: 600 }}>
+                      {isScraping ? <Loader2 size={16} className="loading-spinner" /> : <Mail size={16} />}
+                      {lang === 'zh' ? '一键获客并生成草稿' : 'Acquire & Draft'}
+                    </button>
 
                     {/* Current Params Summary */}
                     {!isScraping && keyword && (
@@ -1432,16 +1995,40 @@ function App() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem' }}>
                     <h2 className="panel-title" style={{ marginBottom: 0 }}>
                       <Terminal size={20} className="brand-icon" />
-                      {lang === 'zh' ? '神经数据流' : 'Neural Data Stream'}
+                      {leadAssetLabels.title}
                     </h2>
                     {leads.length > 0 && (
-                      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                         <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
-                          {lang === 'zh' ? `共 ${leads.length} 条线索` : `${leads.length} leads found`}
+                          {`${leads.length} leads`}
                         </span>
+                        <span style={{ fontSize: '0.82rem', color: emailReadyLeads.length ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {`${emailReadyLeads.length} emails`}
+                        </span>
+                        <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                          {`${emailMissingLeads.length} missing`}
+                        </span>
+                        <button style={{ padding: '0.3rem 0.8rem', fontSize: '0.8rem', fontWeight: 600, background: emailReadyLeads.length ? 'rgba(16,185,129,0.12)' : 'rgba(255,255,255,0.04)', color: emailReadyLeads.length ? 'var(--success)' : 'var(--text-muted)', border: `1px solid ${emailReadyLeads.length ? 'rgba(16,185,129,0.3)' : 'rgba(255,255,255,0.08)'}`, borderRadius: '0.4rem', cursor: emailReadyLeads.length ? 'pointer' : 'not-allowed', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                          disabled={!emailReadyLeads.length}
+                          onClick={() => openEmailWorkflow()}>
+                          <Mail size={14} />
+                          Email Outreach
+                        </button>
                         <button style={{ padding: '0.3rem 0.8rem', fontSize: '0.8rem', fontWeight: 600, background: 'rgba(16,185,129,0.12)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '0.4rem', cursor: 'pointer', fontFamily: 'inherit' }}
                           onClick={() => setActiveTab('marketing')}>
-                          {lang === 'zh' ? '→ 发送至营销引擎' : '→ Send to Marketing'}
+                          Marketing
+                        </button>
+                        <button style={{ padding: '0.3rem 0.8rem', fontSize: '0.8rem', fontWeight: 600, background: 'rgba(16,185,129,0.12)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)', borderRadius: '0.4rem', cursor: displayedLeadAssets.length && !assetEnriching ? 'pointer' : 'not-allowed', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                          disabled={!displayedLeads.length || assetEnriching}
+                          onClick={enrichLeadAssets}>
+                          <Sparkles size={14} className={assetEnriching ? 'loading-spinner' : ''} />
+                          {leadAssetLabels.enrich}
+                        </button>
+                        <button style={{ padding: '0.3rem 0.8rem', fontSize: '0.8rem', fontWeight: 600, background: 'rgba(99,102,241,0.14)', color: 'var(--primary)', border: '1px solid rgba(99,102,241,0.35)', borderRadius: '0.4rem', cursor: displayedLeadAssets.length ? 'pointer' : 'not-allowed', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                          disabled={!displayedLeadAssets.length}
+                          onClick={downloadLeadAssets}>
+                          <Download size={14} />
+                          {leadAssetLabels.download}
                         </button>
                       </div>
                     )}
@@ -1452,16 +2039,21 @@ function App() {
                       className="input-field"
                       value={leadsSearch}
                       onChange={e => setLeadsSearch(e.target.value)}
-                      placeholder={lang === 'zh' ? '搜索用户名或邮箱' : 'Search username or email'}
+                      placeholder={leadAssetLabels.search}
                       style={{ flex: 1, padding: '0.55rem 0.8rem' }}
                     />
                     <select className="input-field" value={leadStatusFilter} onChange={e => setLeadStatusFilter(e.target.value)} style={{ padding: '0.55rem 0.8rem' }}>
-                      <option value="">{lang === 'zh' ? '全部状态' : 'All statuses'}</option>
+                      <option value="">{leadAssetLabels.allStatuses}</option>
                       <option value="new">New</option>
                       <option value="contacted">Contacted</option>
                       <option value="qualified">Qualified</option>
                       <option value="converted">Converted</option>
                       <option value="lost">Lost</option>
+                    </select>
+                    <select className="input-field" value={leadEmailFilter} onChange={e => setLeadEmailFilter(e.target.value)} style={{ padding: '0.55rem 0.8rem' }}>
+                      <option value="">{leadAssetLabels.allEmails}</option>
+                      <option value="with_email">{leadAssetLabels.hasEmail}</option>
+                      <option value="without_email">{leadAssetLabels.noEmail}</option>
                     </select>
                     <button className="btn" onClick={fetchLeads} disabled={leadsLoading} style={{ padding: '0.55rem 0.8rem', gap: '0.35rem' }}>
                       <RefreshCw size={14} className={leadsLoading ? 'loading-spinner' : ''} />
@@ -1469,43 +2061,84 @@ function App() {
                     </button>
                   </div>
 
-                  {leads.length > 0 ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', overflowY: 'auto' }}>
-                      {leads.map((lead, idx) => {
-                        const platformColor = lead.platform === 'x' ? '#1d9bf0' : lead.platform === 'linkedin' ? '#0a66c2' : '#96bf48';
-                        return (
-                          <div key={lead.id || idx} style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', padding: '0.9rem 1.1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)', transition: 'border-color 0.2s' }}
-                            onMouseOver={e => e.currentTarget.style.borderColor = 'rgba(99,102,241,0.35)'}
-                            onMouseOut={e => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.05)'}
-                          >
-                            {/* Index */}
-                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'monospace', width: '1.5rem', flexShrink: 0, textAlign: 'center' }}>{'0' + (idx + 1)}</span>
-                            {/* Platform badge */}
-                            <span style={{ padding: '0.2rem 0.6rem', borderRadius: '0.3rem', fontSize: '0.72rem', fontWeight: 700, background: `${platformColor}20`, color: platformColor, border: `1px solid ${platformColor}40`, flexShrink: 0, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{lead.platform}</span>
-                            {/* Username */}
-                            <span style={{ fontWeight: 600, color: '#fff', fontSize: '0.9rem', minWidth: '8rem', flexShrink: 0 }}>{lead.username}</span>
-                            {/* URL */}
-                            <a href={lead.profile_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.82rem', textDecoration: 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                              {lead.profile_url}
-                            </a>
-                            {/* Tags */}
-                            <div style={{ display: 'flex', gap: '0.3rem', flexShrink: 0 }}>
-                              {lead.tags?.slice(0, 3).map((tag, ti) => (
-                                <span key={ti} style={{ fontSize: '0.7rem', padding: '0.15rem 0.45rem', borderRadius: '0.25rem', background: 'rgba(255,255,255,0.06)', color: 'var(--text-muted)', border: '1px solid rgba(255,255,255,0.08)' }}>{tag}</span>
-                              ))}
-                            </div>
-                            <select value={lead.status || 'new'} onChange={e => updateLeadStatus(lead.id, e.target.value)} className="input-field" style={{ padding: '0.3rem 0.45rem', fontSize: '0.72rem' }}>
-                              <option value="new">New</option>
-                              <option value="contacted">Contacted</option>
-                              <option value="qualified">Qualified</option>
-                              <option value="converted">Converted</option>
-                              <option value="lost">Lost</option>
-                            </select>
-                            <button title="Details" onClick={() => fetchLeadDetails(lead.id)} style={{ color: 'var(--primary)', background: 'transparent', border: 0, cursor: 'pointer' }}><Eye size={15} /></button>
-                            <button title="Delete" onClick={() => deleteLead(lead.id)} style={{ color: '#f87171', background: 'transparent', border: 0, cursor: 'pointer' }}><Trash2 size={15} /></button>
-                          </div>
-                        );
-                      })}
+                  {displayedLeadAssets.length > 0 ? (
+                    <div className="results-table-container" style={{ borderRadius: '0.5rem', overflow: 'auto' }}>
+                      <table className="results-table lead-assets-table" style={{ minWidth: '1480px' }}>
+                        <colgroup>
+                          <col style={{ width: '220px' }} />
+                          <col style={{ width: '220px' }} />
+                          <col style={{ width: '140px' }} />
+                          <col style={{ width: '220px' }} />
+                          <col style={{ width: '180px' }} />
+                          <col style={{ width: '150px' }} />
+                          <col style={{ width: '130px' }} />
+                          <col style={{ width: '120px' }} />
+                          <col style={{ width: '120px' }} />
+                          <col style={{ width: '80px' }} />
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            <th>{leadAssetLabels.companyName}</th>
+                            <th>{leadAssetLabels.website}</th>
+                            <th>{leadAssetLabels.founder}</th>
+                            <th>{leadAssetLabels.linkedIn}</th>
+                            <th>{leadAssetLabels.email}</th>
+                            <th>{leadAssetLabels.funding}</th>
+                            <th>{leadAssetLabels.employeeSize}</th>
+                            <th>{leadAssetLabels.country}</th>
+                            <th>{leadAssetLabels.status}</th>
+                            <th>{leadAssetLabels.actions}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayedLeadAssets.map((asset, idx) => {
+                            const lead = asset.raw;
+                            const platformColor = lead.platform === 'x' ? '#1d9bf0' : lead.platform === 'linkedin' ? '#0a66c2' : lead.platform === 'shopify' ? '#96bf48' : 'var(--primary)';
+                            return (
+                              <tr key={lead.id || idx}>
+                                <td>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', minWidth: 0 }}>
+                                    <span style={{ padding: '0.15rem 0.42rem', borderRadius: '0.25rem', fontSize: '0.68rem', fontWeight: 700, background: `${platformColor}20`, color: platformColor, border: `1px solid ${platformColor}40`, flexShrink: 0, textTransform: 'uppercase' }}>{lead.platform}</span>
+                                    <span title={asset.companyName || '-'} style={{ fontWeight: 700, color: '#fff', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{asset.companyName || '-'}</span>
+                                    {lead.metadata?.tier && <span title={lead.metadata?.next_action || ''} style={{ padding: '0.1rem 0.32rem', borderRadius: '0.25rem', fontSize: '0.65rem', fontWeight: 700, color: lead.metadata.tier === 'S' || lead.metadata.tier === 'A' ? '#34d399' : lead.metadata.tier === 'B' ? '#fbbf24' : 'var(--text-muted)', border: '1px solid currentColor', flexShrink: 0 }}>{lead.metadata.tier}</span>}
+                                  </div>
+                                </td>
+                                <td>
+                                  {asset.website ? (
+                                    <a href={asset.website} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'none', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '14rem' }}>{asset.website}</a>
+                                  ) : <span style={{ color: 'var(--text-muted)' }}>-</span>}
+                                </td>
+                                <td title={asset.founder || '-'}>{asset.founder || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
+                                <td>
+                                  {asset.linkedIn ? (
+                                    <a href={asset.linkedIn} target="_blank" rel="noreferrer" style={{ color: '#60a5fa', textDecoration: 'none', display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '14rem' }}>{asset.linkedIn}</a>
+                                  ) : <span style={{ color: 'var(--text-muted)' }}>-</span>}
+                                </td>
+                                <td title={asset.email || 'No public email found'} style={{ color: asset.email ? 'var(--success)' : 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '12rem' }}>{asset.email || '-'}</td>
+                                <td title={asset.funding || '-'}>{asset.funding || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
+                                <td title={asset.employeeSize || '-'}>{asset.employeeSize || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
+                                <td title={asset.country || '-'}>{asset.country || <span style={{ color: 'var(--text-muted)' }}>-</span>}</td>
+                                <td>
+                                  <select value={lead.status || 'new'} onChange={e => updateLeadStatus(lead.id, e.target.value)} className="input-field" style={{ padding: '0.3rem 0.45rem', fontSize: '0.72rem', minWidth: '7rem' }}>
+                                    <option value="new">New</option>
+                                    <option value="contacted">Contacted</option>
+                                    <option value="qualified">Qualified</option>
+                                    <option value="converted">Converted</option>
+                                    <option value="lost">Lost</option>
+                                  </select>
+                                </td>
+                                <td>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                                    <button title={asset.email ? 'Start email outreach' : 'No public email'} disabled={!asset.email} onClick={() => openEmailWorkflow(lead)} style={{ color: asset.email ? 'var(--success)' : 'var(--text-muted)', background: 'transparent', border: 0, cursor: asset.email ? 'pointer' : 'not-allowed', opacity: asset.email ? 1 : 0.45 }}><Mail size={15} /></button>
+                                    <button title="Details" onClick={() => fetchLeadDetails(lead.id)} style={{ color: 'var(--primary)', background: 'transparent', border: 0, cursor: 'pointer' }}><Eye size={15} /></button>
+                                    <button title="Delete" disabled={deletingLeadIds.has(lead.id)} onClick={() => deleteLead(lead.id)} style={{ color: '#f87171', background: 'transparent', border: 0, cursor: deletingLeadIds.has(lead.id) ? 'not-allowed' : 'pointer', opacity: deletingLeadIds.has(lead.id) ? 0.45 : 1 }}><Trash2 size={15} /></button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
                   ) : (
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '3rem 2rem', color: 'var(--text-muted)' }}>
@@ -1542,7 +2175,10 @@ function App() {
                           {leadDetails.platform} · score {leadDetails.quality_score || 0}
                         </span>
                       </div>
-                      <button onClick={() => setLeadDetails(null)} style={{ color: 'var(--text-muted)', background: 'transparent', border: 0, cursor: 'pointer' }}><X size={16} /></button>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                        <button className="btn" onClick={() => generateChatDrafts(leadDetails.id)}><Sparkles size={14} /> {lang === 'zh' ? '生成 Chat 草稿' : 'Generate Chat Drafts'}</button>
+                        <button onClick={() => setLeadDetails(null)} style={{ color: 'var(--text-muted)', background: 'transparent', border: 0, cursor: 'pointer' }}><X size={16} /></button>
+                      </div>
                     </div>
                     {leadDetails.metadata && Object.keys(leadDetails.metadata).length > 0 && (
                       <pre style={{ color: 'var(--text-muted)', whiteSpace: 'pre-wrap', fontSize: '0.75rem' }}>{JSON.stringify(leadDetails.metadata, null, 2)}</pre>
@@ -1552,15 +2188,68 @@ function App() {
                         <div key={message.id} style={{ padding: '0.75rem', background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '0.45rem' }}>
                           <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
                             <strong style={{ fontSize: '0.78rem' }}>{message.channel}</strong>
-                            <select value={message.status} onChange={e => updateDraftStatus(message.id, e.target.value)} className="input-field" style={{ padding: '0.2rem 0.35rem', fontSize: '0.7rem' }}>
-                              <option value="draft">Draft</option>
-                              <option value="approved">Approved</option>
-                              <option value="sent">Sent</option>
-                              <option value="archived">Archived</option>
-                            </select>
+                            <span style={{ color: message.status === 'failed' ? '#f87171' : message.status === 'sent' ? '#34d399' : '#fbbf24', fontSize: '0.7rem', textTransform: 'uppercase' }}>{message.status}</span>
                           </div>
-                          {message.subject && <div style={{ marginTop: '0.35rem', color: '#fff', fontSize: '0.78rem' }}>{message.subject}</div>}
-                          <div style={{ marginTop: '0.35rem', color: 'var(--text-muted)', whiteSpace: 'pre-wrap', fontSize: '0.76rem' }}>{message.body}</div>
+                          {message.channel === 'email' && (
+                            <input
+                              className="input-field"
+                              value={message.subject || ''}
+                              disabled={!['draft', 'failed'].includes(message.status)}
+                              onChange={e => updateChatDraftLocal(message.id, 'subject', e.target.value)}
+                              style={{ width: '100%', boxSizing: 'border-box', marginTop: '0.45rem', fontSize: '0.76rem' }}
+                              aria-label="Email subject"
+                            />
+                          )}
+                          <textarea
+                            className="input-field"
+                            value={message.body || ''}
+                            disabled={!['draft', 'failed'].includes(message.status)}
+                            onChange={e => updateChatDraftLocal(message.id, 'body', e.target.value)}
+                            rows={5}
+                            style={{ width: '100%', boxSizing: 'border-box', marginTop: '0.45rem', fontSize: '0.76rem', resize: 'vertical' }}
+                            aria-label="Message body"
+                          />
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center', marginTop: '0.5rem' }}>
+                            <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>
+                              {lang === 'zh' ? '质量' : 'Quality'} {message.quality_score ?? '-'} / 100
+                            </span>
+                            {(message.risk_flags || []).map(flag => (
+                              <span key={flag} style={{ color: '#fbbf24', fontSize: '0.65rem' }}>{flag}</span>
+                            ))}
+                          </div>
+                          {message.last_error && <div style={{ color: '#f87171', fontSize: '0.68rem', marginTop: '0.4rem' }}>{message.last_error}</div>}
+                          {message.scheduled_at && (
+                            <div style={{ color: 'var(--text-muted)', fontSize: '0.68rem', marginTop: '0.4rem' }}>
+                              {lang === 'zh' ? '计划发送' : 'Scheduled'}: {new Date(message.scheduled_at).toLocaleString()}
+                            </div>
+                          )}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', marginTop: '0.6rem' }}>
+                            {['draft', 'failed'].includes(message.status) && (
+                              <>
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'save')}><CheckCircle size={14} /> {lang === 'zh' ? '保存' : 'Save'}</button>
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'regenerate')}><RefreshCw size={14} /> {lang === 'zh' ? '重新生成' : 'Regenerate'}</button>
+                              </>
+                            )}
+                            {message.status === 'draft' && CHAT_DELIVERABLE_CHANNELS.has(message.channel) && (
+                              <button className="btn" onClick={() => runChatMessageAction(message, 'approve')}><CheckCircle size={14} /> {lang === 'zh' ? '审批' : 'Approve'}</button>
+                            )}
+                            {['approved', 'failed'].includes(message.status) && message.approved_at && (
+                              <>
+                                {['linkedin_dm', 'twitter_dm'].includes(message.channel) && (
+                                  <button className="btn" onClick={() => runChatMessageAction(message, 'dryRun')}><Eye size={14} /> Dry Run</button>
+                                )}
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'send')}><Send size={14} /> {message.status === 'failed' ? (lang === 'zh' ? '重试' : 'Retry') : (lang === 'zh' ? '发送' : 'Send')}</button>
+                              </>
+                            )}
+                            {message.status === 'sent' && !message.follow_up_sequence_id && (
+                              <button className="btn" onClick={() => startFollowUps(message)}>
+                                <Clock size={14} /> {lang === 'zh' ? '启动自动跟进' : 'Start Follow-ups'}
+                              </button>
+                            )}
+                            {!['sent', 'archived'].includes(message.status) && (
+                              <button className="btn" onClick={() => updateDraftStatus(message.id, 'archived')}><Trash2 size={14} /> {lang === 'zh' ? '归档' : 'Archive'}</button>
+                            )}
+                          </div>
                         </div>
                       ))}
                       {(leadDetails.marketing_messages || []).length === 0 && (
@@ -1574,6 +2263,178 @@ function App() {
               </>
             )}
 
+
+          {activeTab === 'chat' && (
+            <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '360px 1fr', gap: '1rem', minHeight: 0 }}>
+              <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                  <h2 className="panel-title" style={{ margin: 0 }}>
+                    <Bot size={18} className="brand-icon" />
+                    {lang === 'zh' ? '线索选择' : 'Lead Selection'}
+                  </h2>
+                  <button className="btn" onClick={fetchLeads} disabled={leadsLoading} style={{ padding: '0.4rem 0.65rem' }}>
+                    <RefreshCw size={14} className={leadsLoading ? 'loading-spinner' : ''} />
+                  </button>
+                </div>
+                <input
+                  className="input-field"
+                  value={leadsSearch}
+                  onChange={e => setLeadsSearch(e.target.value)}
+                  placeholder={lang === 'zh' ? '搜索线索' : 'Search leads'}
+                  style={{ width: '100%', boxSizing: 'border-box', marginBottom: '0.75rem' }}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', overflowY: 'auto', minHeight: 0 }}>
+                  {leads.map(lead => (
+                    <button
+                      key={lead.id}
+                      onClick={() => fetchLeadDetails(lead.id)}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'stretch',
+                        gap: '0.35rem',
+                        padding: '0.8rem',
+                        background: leadDetails?.id === lead.id ? 'rgba(99,102,241,0.16)' : 'rgba(0,0,0,0.2)',
+                        border: `1px solid ${leadDetails?.id === lead.id ? 'rgba(99,102,241,0.55)' : 'rgba(255,255,255,0.06)'}`,
+                        borderRadius: '0.5rem',
+                        color: '#fff',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                        fontFamily: 'inherit'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.6rem', alignItems: 'center' }}>
+                        <strong style={{ fontSize: '0.84rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lead.username}</strong>
+                        <span style={{ color: 'var(--primary)', fontSize: '0.68rem', textTransform: 'uppercase' }}>{lead.platform}</span>
+                      </div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lead.email || lead.profile_url || '-'}</div>
+                    </button>
+                  ))}
+                  {!leads.length && (
+                    <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', padding: '1rem', textAlign: 'center' }}>
+                      {lang === 'zh' ? '暂无线索，请先在线索捕获器提取或创建线索。' : 'No leads yet. Extract or create leads first.'}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="glass-panel" style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                {!leadDetails ? (
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', gap: '0.75rem' }}>
+                    <Bot size={42} style={{ opacity: 0.28 }} />
+                    <div>{lang === 'zh' ? '选择一个线索开始测试 Chat Agent' : 'Select a lead to test Chat Agent'}</div>
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', marginBottom: '0.25rem' }}>
+                          <strong style={{ fontSize: '1.05rem', color: '#fff' }}>{leadDetails.username}</strong>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--primary)', textTransform: 'uppercase' }}>{leadDetails.platform}</span>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>score {leadDetails.quality_score || 0}</span>
+                        </div>
+                        <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>{leadDetails.email || leadDetails.profile_url || '-'}</div>
+                      </div>
+                      <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                        <button className="btn" disabled={chatGenerationBusy} onClick={() => generateChatDrafts(leadDetails.id)}><Sparkles size={14} /> {chatGenerationBusy ? 'Generating...' : 'Generate English Drafts'}</button>
+                        <button className="btn" onClick={() => fetchLeadDetails(leadDetails.id)}><RefreshCw size={14} /> {lang === 'zh' ? '刷新' : 'Refresh'}</button>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 180px', gap: '0.75rem', padding: '0.85rem', marginBottom: '0.9rem', background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '0.5rem' }}>
+                      <div>
+                        <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: '0.35rem' }}>{lang === 'zh' ? '产品与价值主张（英文）' : 'Product and value proposition'}</label>
+                        <textarea className="input-field" value={chatProductContext} onChange={e => setChatProductContext(e.target.value)} rows={3} maxLength={4000} style={{ width: '100%', boxSizing: 'border-box', resize: 'vertical', fontSize: '0.78rem' }} />
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+                        <div>
+                          <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: '0.35rem' }}>{lang === 'zh' ? '生成语言' : 'Language'}</label>
+                          <select className="input-field" value="en" disabled style={{ width: '100%', boxSizing: 'border-box' }}><option value="en">English</option></select>
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', color: 'var(--text-muted)', fontSize: '0.72rem', marginBottom: '0.35rem' }}>{lang === 'zh' ? '自动发送最低质量' : 'Minimum auto-send quality'}</label>
+                          <input className="input-field" type="number" min="60" max="100" value={chatMinQuality} onChange={e => setChatMinQuality(Math.min(100, Math.max(60, Number(e.target.value) || 80)))} style={{ width: '100%', boxSizing: 'border-box' }} />
+                        </div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: chatAutoSend ? '#fbbf24' : 'var(--text-muted)', fontSize: '0.74rem', cursor: 'pointer' }}>
+                          <input type="checkbox" checked={chatAutoSend} onChange={e => setChatAutoSend(e.target.checked)} />
+                          {lang === 'zh' ? '自动审批并真实发送' : 'Auto-approve and send'}
+                        </label>
+                      </div>
+                    </div>
+                    {chatAutoSend && <div style={{ color: '#fbbf24', fontSize: '0.72rem', marginBottom: '0.75rem' }}>{lang === 'zh' ? '自动发送已开启：生成后将真实发送所有质量达标且无风险标记的消息。' : 'Auto-send is enabled: qualifying drafts will be delivered immediately.'}</div>}
+                    {chatAutomationReport && <div style={{ color: 'var(--text-muted)', fontSize: '0.74rem', marginBottom: '0.75rem' }}>{lang === 'zh' ? '自动发送结果' : 'Auto-delivery result'}: {chatAutomationReport.sent} sent, {chatAutomationReport.queued} queued, {chatAutomationReport.skipped} skipped, {chatAutomationReport.failed} failed</div>}
+
+                    <div style={{ display: 'grid', gap: '0.75rem', overflowY: 'auto', paddingRight: '0.25rem' }}>
+                      {(leadDetails.marketing_messages || []).map(message => (
+                        <div key={message.id} style={{ padding: '0.9rem', background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: '0.5rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
+                            <strong style={{ color: '#fff', fontSize: '0.82rem' }}>{message.channel}</strong>
+                            <span style={{ color: message.status === 'failed' ? '#f87171' : message.status === 'sent' ? '#34d399' : message.status === 'cancelled' ? 'var(--text-muted)' : '#fbbf24', fontSize: '0.7rem', textTransform: 'uppercase' }}>{message.status}</span>
+                          </div>
+                          {message.channel === 'email' && (
+                            <input
+                              className="input-field"
+                              value={message.subject || ''}
+                              disabled={!['draft', 'failed'].includes(message.status)}
+                              onChange={e => updateChatDraftLocal(message.id, 'subject', e.target.value)}
+                              style={{ width: '100%', boxSizing: 'border-box', marginTop: '0.5rem', fontSize: '0.78rem' }}
+                              aria-label="Email subject"
+                            />
+                          )}
+                          <textarea
+                            className="input-field"
+                            value={message.body || ''}
+                            disabled={!['draft', 'failed'].includes(message.status)}
+                            onChange={e => updateChatDraftLocal(message.id, 'body', e.target.value)}
+                            rows={5}
+                            style={{ width: '100%', boxSizing: 'border-box', marginTop: '0.5rem', fontSize: '0.78rem', resize: 'vertical' }}
+                            aria-label="Message body"
+                          />
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', alignItems: 'center', marginTop: '0.55rem', color: 'var(--text-muted)', fontSize: '0.7rem' }}>
+                            <span>{lang === 'zh' ? '质量' : 'Quality'} {message.quality_score ?? '-'} / 100</span>
+                            {message.estimated_cost_usd > 0 && <span>${Number(message.estimated_cost_usd).toFixed(5)}</span>}
+                            {message.scheduled_at && <span>{lang === 'zh' ? '计划' : 'Scheduled'} {new Date(message.scheduled_at).toLocaleString()}</span>}
+                            {(message.risk_flags || []).map(flag => <span key={flag} style={{ color: '#fbbf24' }}>{flag}</span>)}
+                          </div>
+                          {message.last_error && <div style={{ color: '#f87171', fontSize: '0.7rem', marginTop: '0.45rem' }}>{message.last_error}</div>}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', marginTop: '0.7rem' }}>
+                            {['draft', 'failed'].includes(message.status) && (
+                              <>
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'save')}><CheckCircle size={14} /> {lang === 'zh' ? '保存' : 'Save'}</button>
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'regenerate')}><RefreshCw size={14} /> {lang === 'zh' ? '重生成' : 'Regenerate'}</button>
+                              </>
+                            )}
+                            {message.status === 'draft' && CHAT_DELIVERABLE_CHANNELS.has(message.channel) && (
+                              <button className="btn" onClick={() => runChatMessageAction(message, 'approve')}><CheckCircle size={14} /> {lang === 'zh' ? '审批' : 'Approve'}</button>
+                            )}
+                            {['approved', 'failed'].includes(message.status) && message.approved_at && (
+                              <>
+                                {['linkedin_dm', 'twitter_dm'].includes(message.channel) && (
+                                  <button className="btn" onClick={() => runChatMessageAction(message, 'dryRun')}><Eye size={14} /> Dry Run</button>
+                                )}
+                                <button className="btn" onClick={() => runChatMessageAction(message, 'send')}><Send size={14} /> {message.status === 'failed' ? (lang === 'zh' ? '重试' : 'Retry') : (lang === 'zh' ? '发送' : 'Send')}</button>
+                              </>
+                            )}
+                            {message.status === 'sent' && !message.follow_up_sequence_id && (
+                              <button className="btn" onClick={() => startFollowUps(message)}><Clock size={14} /> {lang === 'zh' ? '启动跟进' : 'Start Follow-ups'}</button>
+                            )}
+                            {!['sent', 'archived'].includes(message.status) && (
+                              <button className="btn" onClick={() => updateDraftStatus(message.id, 'archived')}><Trash2 size={14} /> {lang === 'zh' ? '归档' : 'Archive'}</button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      {(leadDetails.marketing_messages || []).length === 0 && (
+                        <div style={{ color: 'var(--text-muted)', fontSize: '0.84rem', padding: '2rem', textAlign: 'center', background: 'rgba(0,0,0,0.16)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                          {lang === 'zh' ? '暂无消息草稿，点击“生成草稿”开始。' : 'No message drafts yet. Click Generate Drafts to start.'}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
 
           {activeTab === 'marketing' && (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -1916,6 +2777,9 @@ function App() {
             }
             const dash = analyticsData?.dashboard;
             const tb = analyticsData?.task_breakdown;
+            const opt = optimizationData?.overview || {};
+            const variants = optimizationData?.by_variant || [];
+            const promptScores = optimizationData?.prompt_evaluations || [];
             const lp = analyticsData?.leads_by_platform || [];
             const totalLeads = lp.reduce((s, r) => s + r.count, 0) || 1;
 
@@ -1951,6 +2815,50 @@ function App() {
                 </div>
 
                 {/* ── Row 2: Chart + Channel Distribution ── */}
+                <div className="glass-panel" style={{ padding: '1.25rem 1.5rem' }}>
+                  <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#fff', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <Sparkles size={17} color="var(--accent)" />
+                    {lang === 'zh' ? '效果优化' : 'Optimization'}
+                    <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: '0.72rem' }}>30d</span>
+                  </h3>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '0.75rem', marginBottom: '1rem' }}>
+                    {[
+                      { label: lang === 'zh' ? '回复率' : 'Reply Rate', value: `${opt.reply_rate ?? 0}%`, color: 'var(--success)' },
+                      { label: lang === 'zh' ? '转化率' : 'Conversion', value: `${opt.conversion_rate ?? 0}%`, color: '#60a5fa' },
+                      { label: lang === 'zh' ? '已发送' : 'Sent', value: opt.sent ?? 0, color: '#8b5cf6' },
+                      { label: lang === 'zh' ? '模型成本' : 'Model Cost', value: `$${(opt.estimated_model_cost_usd ?? 0).toFixed(4)}`, color: 'var(--accent)' },
+                    ].map((item, i) => (
+                      <div key={i} style={{ padding: '0.85rem 1rem', background: 'rgba(0,0,0,0.2)', borderRadius: '0.5rem', border: '1px solid rgba(255,255,255,0.05)' }}>
+                        <div style={{ color: item.color, fontSize: '1.35rem', fontWeight: 700 }}>{item.value}</div>
+                        <div style={{ color: 'var(--text-muted)', fontSize: '0.72rem', marginTop: '0.2rem' }}>{item.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+                    <div style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '0.5rem', padding: '0.85rem' }}>
+                      <div style={{ color: '#fff', fontWeight: 600, fontSize: '0.82rem', marginBottom: '0.6rem' }}>{lang === 'zh' ? 'A/B 变体' : 'A/B Variants'}</div>
+                      {(variants.length ? variants.slice(0, 4) : [{ variant: '-', sent: 0, reply_rate: 0, conversion_rate: 0 }]).map((row, i) => (
+                        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 60px 70px 70px', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.74rem', padding: '0.25rem 0', borderTop: i ? '1px solid rgba(255,255,255,0.04)' : 0 }}>
+                          <span style={{ color: '#d1d5db' }}>{row.experiment_name ? `${row.experiment_name} / ${row.variant}` : row.variant}</span>
+                          <span>{row.sent}</span>
+                          <span>{row.reply_rate}%</span>
+                          <span>{row.conversion_rate}%</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ background: 'rgba(0,0,0,0.18)', border: '1px solid rgba(255,255,255,0.05)', borderRadius: '0.5rem', padding: '0.85rem' }}>
+                      <div style={{ color: '#fff', fontWeight: 600, fontSize: '0.82rem', marginBottom: '0.6rem' }}>{lang === 'zh' ? '提示词评分' : 'Prompt Scores'}</div>
+                      {(promptScores.length ? promptScores.slice(0, 4) : [{ name: '-', model: '-', score: 0 }]).map((row, i) => (
+                        <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr 70px 48px', gap: '0.5rem', color: 'var(--text-muted)', fontSize: '0.74rem', padding: '0.25rem 0', borderTop: i ? '1px solid rgba(255,255,255,0.04)' : 0 }}>
+                          <span style={{ color: '#d1d5db' }}>{row.name}</span>
+                          <span>{row.model || '-'}</span>
+                          <span style={{ color: row.score >= 80 ? 'var(--success)' : '#fbbf24', fontWeight: 700 }}>{row.score}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
                 <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr', gap: '1rem' }}>
                   {/* Area Chart */}
                   <div className="glass-panel" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column' }}>

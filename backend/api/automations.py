@@ -11,7 +11,6 @@ from automation.engine import SUPPORTED_TRIGGER_TYPES, as_dict, validate_definit
 from automation.delivery import enqueue_delivery
 from automation.providers import DEFAULT_MODEL, automation_ai_provider
 from automation.settings import (
-    DEFAULT_SETTINGS,
     encrypt_secret,
     get_automation_settings,
 )

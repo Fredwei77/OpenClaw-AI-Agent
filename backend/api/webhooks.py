@@ -1,6 +1,5 @@
 import json
 import uuid
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import asyncpg
@@ -9,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from automation.engine import AutomationEngine
 from automation.intelligence import analyze_message
+from agents.chat_agent.follow_up import stop_sequences_for_reply
 from .auth import UserResponse, get_current_user, get_db_pool
 
 router = APIRouter()
@@ -32,6 +32,7 @@ class WebhookSimulationRequest(BaseModel):
     contact: SimulatedContact
     message: SimulatedMessage
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    lead_id: Optional[int] = Field(default=None, ge=1)
 
 
 class WebhookSimulationResponse(BaseModel):
@@ -75,8 +76,18 @@ async def simulate_webhook(
                     request.channel,
                     json.dumps(payload, ensure_ascii=False),
                 )
-                lead_id = await conn.fetchval(
-                    """INSERT INTO leads
+                lead_id = None
+                if request.lead_id is not None:
+                    lead_id = await conn.fetchval(
+                        "SELECT id FROM leads WHERE id = $1 AND user_id = $2",
+                        request.lead_id,
+                        current_user.id,
+                    )
+                    if lead_id is None:
+                        raise HTTPException(status_code=404, detail="Lead not found")
+                if lead_id is None:
+                    lead_id = await conn.fetchval(
+                        """INSERT INTO leads
                        (user_id, platform, username, email, followers, tags, status, metadata)
                        VALUES ($1, $2, $3, $4, 0, $5, 'new', $6::jsonb)
                        ON CONFLICT (user_id, platform, username)
@@ -88,16 +99,16 @@ async def simulate_webhook(
                            ),
                            metadata = leads.metadata || EXCLUDED.metadata
                        RETURNING id""",
-                    current_user.id,
-                    request.channel,
-                    request.contact.external_id,
-                    request.contact.email,
-                    request.contact.tags,
-                    json.dumps(
-                        {"display_name": request.contact.name, **request.metadata},
-                        ensure_ascii=False,
-                    ),
-                )
+                        current_user.id,
+                        request.channel,
+                        request.contact.external_id,
+                        request.contact.email,
+                        request.contact.tags,
+                        json.dumps(
+                            {"display_name": request.contact.name, **request.metadata},
+                            ensure_ascii=False,
+                        ),
+                    )
                 conversation_id = await conn.fetchval(
                     """INSERT INTO conversations
                        (user_id, lead_id, channel, external_id, metadata, last_message_at)
@@ -154,6 +165,12 @@ async def simulate_webhook(
                     current_user.id,
                     request.message.content,
                     json.dumps({"event_id": event_id}, ensure_ascii=False),
+                )
+                await stop_sequences_for_reply(
+                    conn,
+                    current_user.id,
+                    lead_id,
+                    conversation_id,
                 )
                 await conn.execute(
                     """UPDATE webhook_events

@@ -55,6 +55,13 @@ const statusColor = (status) => ({
   high: '#fbbf24',
 }[status] || '#9ca3af');
 
+const apiErrorMessage = (data) => {
+  const detail = data?.detail ?? data?.error;
+  if (typeof detail === 'string') return detail;
+  if (detail && typeof detail === 'object') return detail.error || detail.message || JSON.stringify(detail);
+  return 'Request failed';
+};
+
 // App owns language selection; this workbench accepts one scalar prop.
 // eslint-disable-next-line react/prop-types
 function AutomationWorkbench({ lang = 'en' }) {
@@ -67,6 +74,14 @@ function AutomationWorkbench({ lang = 'en' }) {
   const [automationSettings, setAutomationSettings] = useState(null);
   const [aiCalls, setAiCalls] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
+  const [outreachReview, setOutreachReview] = useState([]);
+  const [acquisitionTasks, setAcquisitionTasks] = useState([]);
+  const [acquisitionRuns, setAcquisitionRuns] = useState([]);
+  const [taskKeyword, setTaskKeyword] = useState('led strip light');
+  const [taskPlatform, setTaskPlatform] = useState('linkedin');
+  const [taskInterval, setTaskInterval] = useState('');
+  const [taskApproval, setTaskApproval] = useState('review');
+  const [taskDelivery, setTaskDelivery] = useState('dry_run');
   const [webhookSecret, setWebhookSecret] = useState('');
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -183,14 +198,14 @@ function AutomationWorkbench({ lang = 'en' }) {
     });
     if (response.status === 204) return null;
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || data.detail || 'Request failed');
+    if (!response.ok) throw new Error(apiErrorMessage(data));
     return data;
   }, []);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [flowData, runData, conversationData, analyticsData, settingsData, callData, deliveryData] = await Promise.all([
+      const [flowData, runData, conversationData, analyticsData, settingsData, callData, deliveryData, outreachData, taskData] = await Promise.all([
         request('/api/automations/'),
         request('/api/automations/runs/recent?limit=50'),
         request('/api/conversations/?limit=100'),
@@ -198,6 +213,8 @@ function AutomationWorkbench({ lang = 'en' }) {
         request('/api/automations/settings'),
         request('/api/automations/ai-calls/recent?limit=20'),
         request('/api/automations/deliveries/recent?limit=20'),
+        request('/api/outreach/review-queue?limit=100'),
+        request('/api/acquisition-tasks/?limit=50'),
       ]);
       setFlows(flowData.flows || []);
       setRuns(runData || []);
@@ -206,6 +223,8 @@ function AutomationWorkbench({ lang = 'en' }) {
       setAutomationSettings(settingsData);
       setAiCalls(callData || []);
       setDeliveries(deliveryData || []);
+      setOutreachReview(outreachData.messages || []);
+      setAcquisitionTasks(taskData || []);
       setNotice('');
     } catch (error) {
       setNotice(error.message);
@@ -407,6 +426,104 @@ function AutomationWorkbench({ lang = 'en' }) {
     }
   };
 
+  const startFollowUps = async (item) => {
+    await request(`/api/chat/messages/${item.id}/follow-ups`, {
+      method: 'POST',
+      body: JSON.stringify({ delays_hours: [72, 168, 336], language: 'en', stop_on_reply: true }),
+    });
+  };
+
+  const approveSendAndFollowUp = async (item) => {
+    setLoading(true);
+    try {
+      let messageItem = item;
+      if (messageItem.status === 'draft') {
+        messageItem = await request(`/api/chat/messages/${item.id}/approve`, { method: 'POST' });
+      }
+      if (['approved', 'failed'].includes(messageItem.status)) {
+        messageItem = await request(`/api/chat/messages/${item.id}/send`, {
+          method: 'POST',
+          body: JSON.stringify({ provider: 'auto', dry_run: false }),
+        });
+      }
+      if (messageItem.status === 'sent' && !messageItem.follow_up_sequence_id) {
+        await startFollowUps(item);
+        setNotice(zh ? `消息 #${item.id} 已发送，Day 3/7/14 跟进已启动。` : `Message #${item.id} sent; Day 3/7/14 follow-ups started.`);
+      } else if (messageItem.status === 'queued') {
+        setNotice(zh ? `消息 #${item.id} 已进入社交渠道发送队列。` : `Message #${item.id} queued for social delivery.`);
+      } else {
+        setNotice(zh ? `消息 #${item.id} 当前状态：${messageItem.status}` : `Message #${item.id} is ${messageItem.status}.`);
+      }
+      await loadData();
+    } catch (error) {
+      setNotice(zh ? `发送失败：${error.message}` : `Send failed: ${error.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startPendingFollowUps = async (item) => {
+    setLoading(true);
+    try {
+      await startFollowUps(item);
+      setNotice(zh ? `消息 #${item.id} 的 Day 3/7/14 跟进已启动。` : `Day 3/7/14 follow-ups started for message #${item.id}.`);
+      await loadData();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const createAcquisitionTask = async () => {
+    if (!taskKeyword.trim()) return;
+    setLoading(true);
+    try {
+      await request('/api/acquisition-tasks/', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: `${taskKeyword.trim()} automation`,
+          keyword: taskKeyword.trim(),
+          platforms: [{ platform: taskPlatform, priority: 3 }],
+          product_context: taskKeyword.trim(),
+          approval_mode: taskApproval,
+          delivery_mode: taskDelivery,
+          interval_hours: taskInterval ? Number(taskInterval) : null,
+        }),
+      });
+      setNotice(zh ? '自动获客任务已创建并进入调度。' : 'Automated acquisition task created and scheduled.');
+      await loadData();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const controlAcquisitionTask = async (task, action) => {
+    setLoading(true);
+    try {
+      await request(`/api/acquisition-tasks/${task.id}/${action}`, { method: 'POST' });
+      await loadData();
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const inspectAcquisitionTask = async (task) => {
+    setLoading(true);
+    try {
+      const runs = await request(`/api/acquisition-tasks/${task.id}/runs`);
+      setAcquisitionRuns(runs || []);
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const filteredConversations = useMemo(
     () => conversations.filter((item) => inboxMode === 'all' || item.mode === inboxMode),
     [conversations, inboxMode],
@@ -443,6 +560,7 @@ function AutomationWorkbench({ lang = 'en' }) {
           ['overview', copy.overview, BarChart3],
           ['flows', copy.flows, Workflow],
           ['inbox', copy.inbox, Inbox],
+          ['outreach', zh ? '待审核外联' : 'Outreach review', ShieldCheck],
           ['output', copy.output, Settings2],
           ['runs', copy.runs, Activity],
         ].map(([id, label, Icon]) => (
@@ -662,6 +780,101 @@ function AutomationWorkbench({ lang = 'en' }) {
               </div>
             )}
           </section>
+        </div>
+      )}
+
+      {activeView === 'outreach' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+        <section style={panel}>
+          <h3 style={{ color: '#fff', margin: '0 0 0.8rem', fontSize: '0.95rem' }}>{zh ? '自动获客任务' : 'Automated acquisition tasks'}</h3>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr 1fr auto', gap: 8 }}>
+            <input className="input-field" value={taskKeyword} onChange={(event) => setTaskKeyword(event.target.value)} placeholder={zh ? '关键词' : 'Keyword'} />
+            <select className="input-field" value={taskPlatform} onChange={(event) => setTaskPlatform(event.target.value)}>
+              <option value="linkedin">LinkedIn</option><option value="x">X</option><option value="shopify">Shopify</option><option value="google">Google</option>
+            </select>
+            <input className="input-field" type="number" min="1" value={taskInterval} onChange={(event) => setTaskInterval(event.target.value)} placeholder={zh ? '间隔小时' : 'Interval hours'} />
+            <select className="input-field" value={taskApproval} onChange={(event) => { setTaskApproval(event.target.value); if (event.target.value === 'review') setTaskDelivery('dry_run'); }}>
+              <option value="review">Review</option><option value="automatic">Automatic</option>
+            </select>
+            <select className="input-field" value={taskDelivery} onChange={(event) => setTaskDelivery(event.target.value)} disabled={taskApproval === 'review'}>
+              <option value="dry_run">Dry run</option><option value="live">Live email</option>
+            </select>
+            <button className="btn" onClick={createAcquisitionTask} disabled={loading || !taskKeyword.trim()}><Plus size={14} /> {zh ? '创建' : 'Create'}</button>
+          </div>
+          {taskApproval === 'automatic' && taskDelivery === 'live' && <div style={{ color: '#fbbf24', fontSize: '0.7rem', marginTop: 7 }}>{zh ? '警告：此策略将自动批准并真实发送邮件。' : 'Warning: this policy automatically approves and sends real email.'}</div>}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
+            {acquisitionTasks.map((task) => (
+              <div key={task.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '0.65rem', background: 'rgba(255,255,255,0.025)', borderRadius: 8 }}>
+                <strong style={{ color: '#fff', fontSize: '0.78rem' }}>{task.name}</strong>
+                <span style={{ color: statusColor(task.status), fontSize: '0.68rem' }}>{task.status}</span>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.66rem' }}>{task.approval_mode}/{task.delivery_mode} · {task.interval_hours ? `every ${task.interval_hours}h` : 'once'} · runs {task.run_count}</span>
+                {task.last_error && <span style={{ color: '#f87171', fontSize: '0.66rem' }}>{task.last_error}</span>}
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 5 }}>
+                  {task.status === 'active' && <button style={subtleButton} onClick={() => controlAcquisitionTask(task, 'pause')}>Pause</button>}
+                  {['paused', 'failed', 'completed'].includes(task.status) && <button style={subtleButton} onClick={() => controlAcquisitionTask(task, 'resume')}>Resume</button>}
+                  {task.status !== 'running' && <button style={subtleButton} onClick={() => controlAcquisitionTask(task, 'run-now')}>Run now</button>}
+                  <button style={subtleButton} onClick={() => inspectAcquisitionTask(task)}>Audit</button>
+                </div>
+              </div>
+            ))}
+            {!acquisitionTasks.length && <Empty text={copy.noData} />}
+          </div>
+          {acquisitionRuns.length > 0 && (
+            <div style={{ marginTop: 12, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+              <div style={{ color: '#fff', fontSize: '0.78rem', marginBottom: 6 }}>{zh ? '最近运行审计' : 'Recent run audit'}</div>
+              {acquisitionRuns.map((run) => (
+                <div key={run.id} style={{ padding: '0.55rem 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <div style={{ color: statusColor(run.status), fontSize: '0.7rem' }}>run #{run.id} · {run.status}</div>
+                  {(run.steps || []).map((step) => <div key={step.id} style={{ color: 'var(--text-muted)', fontSize: '0.66rem', marginTop: 3 }}>{step.step_type} · {step.status}{step.error ? ` · ${step.error}` : ''}</div>)}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section style={panel}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: '1rem' }}>
+            <ShieldCheck size={18} color="#a78bfa" />
+            <h3 style={{ color: '#fff', margin: 0, fontSize: '0.95rem' }}>{zh ? '待审核外联' : 'Outreach review'}</h3>
+            <span style={{ color: 'var(--text-muted)', fontSize: '0.72rem' }}>
+              {outreachReview.filter((item) => item.status === 'draft').length} draft · {outreachReview.filter((item) => item.status === 'sent').length} sent
+            </span>
+            <button onClick={loadData} disabled={loading} style={{ ...subtleButton, marginLeft: 'auto' }}>
+              <RefreshCw size={14} className={loading ? 'loading-spinner' : ''} /> {copy.refresh}
+            </button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.7rem' }}>
+            {outreachReview.map((item) => (
+              <article key={item.id} style={{ padding: '0.9rem', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 9, background: 'rgba(255,255,255,0.025)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <strong style={{ color: '#fff', fontSize: '0.86rem' }}>{item.lead_name}</strong>
+                  <span style={{ color: '#60a5fa', fontSize: '0.68rem' }}>{item.channel}</span>
+                  <span style={{ color: statusColor(item.status), fontSize: '0.68rem', textTransform: 'uppercase' }}>{item.status}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.66rem', marginLeft: 'auto' }}>#{item.campaign_id || '-'} {item.campaign_name}</span>
+                </div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', marginTop: 5 }}>{item.lead_email || 'No email'} · lead #{item.lead_id}</div>
+                {item.subject && <div style={{ color: '#ddd6fe', fontSize: '0.78rem', fontWeight: 600, marginTop: 9 }}>{item.subject}</div>}
+                <div style={{ color: '#d1d5db', fontSize: '0.76rem', lineHeight: 1.5, marginTop: 6, whiteSpace: 'pre-wrap' }}>{item.body}</div>
+                {item.last_error && <div style={{ color: '#fca5a5', fontSize: '0.7rem', marginTop: 7 }}>{item.last_error}</div>}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 10 }}>
+                  {['draft', 'approved', 'failed'].includes(item.status) && (
+                    <button className="btn" onClick={() => approveSendAndFollowUp(item)} disabled={loading || (item.channel === 'email' && !item.lead_email)} style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                      <Send size={14} /> {zh ? '批准并发送' : 'Approve & send'}
+                    </button>
+                  )}
+                  {item.channel === 'email' && !item.lead_email && <span style={{ color: '#fbbf24', fontSize: '0.68rem' }}>{zh ? '缺少邮箱，无法发送' : 'Missing email; cannot send'}</span>}
+                  {item.status === 'sent' && !item.follow_up_sequence_id && (
+                    <button onClick={() => startPendingFollowUps(item)} disabled={loading} style={subtleButton}>
+                      <Workflow size={14} /> {zh ? '启动 Day 3/7/14 跟进' : 'Start Day 3/7/14 follow-ups'}
+                    </button>
+                  )}
+                  {item.follow_up_sequence_id && <span style={{ color: '#34d399', fontSize: '0.7rem' }}>{zh ? '跟进运行中' : 'Follow-up active'} #{item.follow_up_sequence_id}</span>}
+                  {item.risk_flags?.length > 0 && <span style={{ color: '#fbbf24', fontSize: '0.68rem' }}>{item.risk_flags.join(', ')}</span>}
+                </div>
+              </article>
+            ))}
+            {!outreachReview.length && <Empty text={copy.noData} />}
+          </div>
+        </section>
         </div>
       )}
 
