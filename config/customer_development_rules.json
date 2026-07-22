@@ -1,0 +1,126 @@
+{
+  "version": "2026-06-29",
+  "name": "OpenClaw Foreign Trade Customer Development Rules",
+  "product_context": {
+    "product_line": "User-defined export product line",
+    "core_advantage": "User-defined differentiator",
+    "default_target_markets": ["Europe", "North America"]
+  },
+  "asset_priority": [
+    {
+      "field": "website",
+      "label": "Official website",
+      "required_for_outreach": true,
+      "search_templates": [
+        "\"{company}\" {keyword} official website",
+        "\"{company}\" contact {keyword}",
+        "\"{company}\" {keyword} manufacturer"
+      ]
+    },
+    {
+      "field": "email",
+      "label": "Public business email",
+      "required_for_outreach": true,
+      "search_templates": [
+        "\"{company}\" contact email",
+        "site:{domain} contact email",
+        "site:{domain} sales email"
+      ]
+    },
+    {
+      "field": "country",
+      "label": "Country",
+      "required_for_outreach": false
+    },
+    {
+      "field": "linkedin_url",
+      "label": "LinkedIn company or decision-maker page",
+      "required_for_outreach": false,
+      "search_templates": [
+        "site:linkedin.com/company \"{company}\"",
+        "site:linkedin.com/in \"{company}\" founder OR owner OR director"
+      ]
+    },
+    {
+      "field": "employee_size",
+      "label": "Employee scale",
+      "required_for_outreach": false
+    },
+    {
+      "field": "founder",
+      "label": "Founder or decision maker",
+      "required_for_outreach": false
+    },
+    {
+      "field": "funding",
+      "label": "Funding or company stage",
+      "required_for_outreach": false
+    }
+  ],
+  "priority_customer_types": [
+    "engineering distributor",
+    "project distributor",
+    "electrical distributor",
+    "lighting distributor",
+    "lighting contractor",
+    "facade lighting contractor",
+    "outdoor lighting contractor",
+    "renovation company",
+    "fit-out contractor",
+    "project procurement team"
+  ],
+  "disqualified_customer_types": [
+    "retailer",
+    "consumer shop",
+    "dropshipping",
+    "trading company",
+    "broker",
+    "middleman",
+    "price only",
+    "quotation only"
+  ],
+  "qualification_rules": {
+    "s_tier": "Score 8-10. Prioritize immediately with tailored email and LinkedIn follow-up.",
+    "a_tier": "Score 5-7. Enrich missing website/email, then start outreach.",
+    "b_tier": "Score 3-4. Keep only when market or project signal is clear.",
+    "c_tier": "Score below 3 or disqualified type. Do not spend manual time."
+  },
+  "company_name_cleanup": {
+    "remove_patterns": [
+      "\\([^)]*@[^)]*\\)",
+      "^@",
+      "\\s+on LinkedIn$",
+      "\\s+\\|\\s+LinkedIn$",
+      "\\s+-\\s+LinkedIn$",
+      "\\s*\\([^)]*followers?[^)]*\\)"
+    ],
+    "masked_terms": ["LinkedIn Member", "领英会员"]
+  },
+  "outreach_sequence": [
+    {
+      "day": 0,
+      "channel": "email",
+      "rule": "Mention one specific project/product signal first. Do not lead with price. End with lead time or stock check."
+    },
+    {
+      "day": 3,
+      "channel": "email",
+      "rule": "Short follow-up with one concrete product/spec angle."
+    },
+    {
+      "day": 7,
+      "channel": "linkedin_dm",
+      "rule": "Use a shorter version of the specific signal and ask whether current project timing is active."
+    },
+    {
+      "day": 14,
+      "channel": "email",
+      "rule": "Ask if the project is delayed, sourcing alternatives, or stock availability is the main issue."
+    },
+    {
+      "day": 30,
+      "channel": "crm",
+      "rule": "No reply after 30 days: downgrade unless new buying signal appears."
+    }
+  ]
+}

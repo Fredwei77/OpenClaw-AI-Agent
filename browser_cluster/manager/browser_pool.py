@@ -244,6 +244,14 @@ class BrowserPoolManager:
         # 尝试找一个健康的、有剩余容量的实例
         async with self._lock:
             for instance_id, instance in self._browsers.items():
+                if instance.browser:
+                    try:
+                        if hasattr(instance.browser, "is_connected") and not instance.browser.is_connected():
+                            instance.is_healthy = False
+                            continue
+                    except Exception:
+                        instance.is_healthy = False
+                        continue
                 if instance.is_healthy and len(instance.contexts) < 10:  # 每个浏览器最多10个context
                     # 检查代理配置、user_data_dir 和 cdp_url 是否匹配
                     if proxy == instance.proxy_config or not proxy:
@@ -319,7 +327,27 @@ class BrowserPoolManager:
                 "password": proxy.get("password", "")
             }
 
-        context = await instance.browser.new_context(**context_options)
+        try:
+            context = await instance.browser.new_context(**context_options)
+        except Exception as e:
+            message = str(e).lower()
+            if "target page, context or browser has been closed" in message or "targetclosed" in message:
+                print(f"[BrowserPool] Browser instance {instance.instance_id} is closed; recreating once")
+                async with self._lock:
+                    instance.is_healthy = False
+                    instance.reference_count = max(0, instance.reference_count - 1)
+                    if instance.instance_id in self._browsers:
+                        await self._close_browser_instance(instance)
+                        del self._browsers[instance.instance_id]
+                instance = await self._get_available_instance(proxy, user_data_dir, cdp_url)
+                async with self._lock:
+                    instance.reference_count += 1
+                    instance.last_used = datetime.now()
+                context = await instance.browser.new_context(**context_options)
+            else:
+                async with self._lock:
+                    instance.reference_count = max(0, instance.reference_count - 1)
+                raise
         instance.contexts[context_id] = context
         instance.last_used = datetime.now()
 

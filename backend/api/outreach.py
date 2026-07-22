@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .auth import UserResponse, get_current_user, get_db_pool
 
@@ -18,6 +19,21 @@ class MarketingMessageResponse(BaseModel):
     cta: str
     sequence_step: int
     status: str
+    personalization_evidence: List[str] = Field(default_factory=list)
+    quality_score: int = 0
+    risk_flags: List[str] = Field(default_factory=list)
+    approved_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    provider: Optional[str] = None
+    attempts: int = 0
+    last_error: Optional[str] = None
+    delivery_task_id: Optional[int] = None
+    follow_up_sequence_id: Optional[int] = None
+    template_version_id: Optional[int] = None
+    ab_experiment_id: Optional[int] = None
+    ab_variant_id: Optional[int] = None
+    estimated_cost_usd: float = 0
     created_at: datetime
 
 
@@ -50,6 +66,92 @@ class MarketingCampaignResponse(BaseModel):
 class MarketingCampaignListResponse(BaseModel):
     campaigns: List[MarketingCampaignResponse]
     total: int
+
+
+class OutreachReviewItem(BaseModel):
+    id: int
+    campaign_id: Optional[int]
+    campaign_name: str
+    lead_id: int
+    lead_name: str
+    lead_email: Optional[str]
+    channel: str
+    subject: str
+    body: str
+    status: str
+    quality_score: int
+    risk_flags: List[str] = Field(default_factory=list)
+    scheduled_at: Optional[datetime]
+    sent_at: Optional[datetime]
+    follow_up_sequence_id: Optional[int]
+    last_error: Optional[str]
+    created_at: datetime
+
+
+class OutreachReviewQueueResponse(BaseModel):
+    messages: List[OutreachReviewItem]
+    total: int
+
+
+def _to_marketing_message(row) -> MarketingMessageResponse:
+    data = dict(row)
+    for field in ("personalization_evidence", "risk_flags"):
+        if isinstance(data.get(field), str):
+            data[field] = json.loads(data[field])
+    return MarketingMessageResponse(**data)
+
+
+def _to_review_item(row) -> OutreachReviewItem:
+    data = dict(row)
+    if isinstance(data.get("risk_flags"), str):
+        data["risk_flags"] = json.loads(data["risk_flags"])
+    return OutreachReviewItem(**data)
+
+
+@router.get("/review-queue", response_model=OutreachReviewQueueResponse)
+async def get_outreach_review_queue(
+    limit: int = Query(100, ge=1, le=200),
+    current_user: UserResponse = Depends(get_current_user),
+):
+    """Return outbound drafts and their delivery/follow-up lifecycle."""
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            """SELECT COUNT(*)
+               FROM marketing_messages m
+               JOIN leads l ON l.id = m.lead_id AND l.user_id = m.user_id
+               WHERE m.user_id = $1 AND m.status <> 'archived'
+                 AND (m.channel <> 'email' OR NULLIF(BTRIM(l.email), '') IS NOT NULL)""",
+            current_user.id,
+        )
+        rows = await conn.fetch(
+            """SELECT m.id, m.campaign_id,
+                      COALESCE(c.name, 'Direct outreach') AS campaign_name,
+                      m.lead_id, COALESCE(l.username, 'Unknown lead') AS lead_name,
+                      l.email AS lead_email, m.channel,
+                      COALESCE(m.subject, '') AS subject, m.body, m.status,
+                      m.quality_score, m.risk_flags, m.scheduled_at, m.sent_at,
+                      m.follow_up_sequence_id, m.last_error, m.created_at
+               FROM marketing_messages m
+               JOIN leads l ON l.id = m.lead_id AND l.user_id = m.user_id
+               LEFT JOIN marketing_campaigns c
+                 ON c.id = m.campaign_id AND c.user_id = m.user_id
+               WHERE m.user_id = $1 AND m.status <> 'archived'
+                 AND (m.channel <> 'email' OR NULLIF(BTRIM(l.email), '') IS NOT NULL)
+               ORDER BY
+                   CASE m.status
+                       WHEN 'draft' THEN 0 WHEN 'failed' THEN 1
+                       WHEN 'approved' THEN 2 WHEN 'sent' THEN 3 ELSE 4
+                   END,
+                   m.created_at DESC, m.id DESC
+               LIMIT $2""",
+            current_user.id,
+            limit,
+        )
+    return OutreachReviewQueueResponse(
+        messages=[_to_review_item(row) for row in rows],
+        total=total,
+    )
 
 
 def _campaign_stage(total: int, draft: int, approved: int, sent: int, archived: int) -> tuple[str, int]:
@@ -111,7 +213,10 @@ async def get_marketing_campaigns(
 @router.get("/", response_model=MarketingMessageListResponse)
 async def get_marketing_messages(
     lead_id: Optional[int] = Query(None, ge=1),
-    status_filter: Optional[Literal["draft", "approved", "sent", "archived"]] = Query(None, alias="status"),
+    status_filter: Optional[Literal[
+        "draft", "approved", "scheduled", "scheduling", "queued",
+        "sending", "sent", "failed", "cancelled", "archived",
+    ]] = Query(None, alias="status"),
     current_user: UserResponse = Depends(get_current_user),
 ):
     pool = await get_db_pool()
@@ -127,14 +232,20 @@ async def get_marketing_messages(
     async with pool.acquire() as conn:
         total = await conn.fetchval(f"SELECT COUNT(*) FROM marketing_messages WHERE {where_clause}", *params)
         rows = await conn.fetch(
-            f"""SELECT id, lead_id, channel, subject, body, cta, sequence_step, status, created_at
+            f"""SELECT id, lead_id, channel, COALESCE(subject, '') AS subject,
+                       body, COALESCE(cta, '') AS cta, sequence_step, status,
+                       personalization_evidence, quality_score, risk_flags,
+                       approved_at, scheduled_at, sent_at, provider, attempts, last_error,
+                       delivery_task_id, follow_up_sequence_id,
+                       template_version_id, ab_experiment_id, ab_variant_id,
+                       estimated_cost_usd, created_at
                 FROM marketing_messages
                 WHERE {where_clause}
                 ORDER BY created_at DESC, id DESC""",
             *params,
         )
     return MarketingMessageListResponse(
-        messages=[MarketingMessageResponse(**dict(row)) for row in rows],
+        messages=[_to_marketing_message(row) for row in rows],
         total=total,
     )
 
@@ -145,13 +256,24 @@ async def update_marketing_message(
     update: MarketingMessageUpdate,
     current_user: UserResponse = Depends(get_current_user),
 ):
+    if update.status in {"approved", "sent"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Use the Chat Agent approval and send endpoints for this transition",
+        )
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE marketing_messages
                SET status = $1
                WHERE id = $2 AND user_id = $3
-               RETURNING id, lead_id, channel, subject, body, cta, sequence_step, status, created_at""",
+               RETURNING id, lead_id, channel, COALESCE(subject, '') AS subject,
+                         body, COALESCE(cta, '') AS cta, sequence_step, status,
+                         personalization_evidence, quality_score, risk_flags,
+                         approved_at, scheduled_at, sent_at, provider, attempts, last_error,
+                         delivery_task_id, follow_up_sequence_id,
+                         template_version_id, ab_experiment_id, ab_variant_id,
+                         estimated_cost_usd, created_at""",
             update.status, message_id, current_user.id,
         )
         if row:
@@ -165,4 +287,4 @@ async def update_marketing_message(
             )
     if not row:
         raise HTTPException(status_code=404, detail="Marketing message not found")
-    return MarketingMessageResponse(**dict(row))
+    return _to_marketing_message(row)

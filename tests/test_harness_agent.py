@@ -3,6 +3,7 @@ import pytest
 import sys
 import os
 import importlib
+import types
 
 # Ensure project root is in path (same as conftest.py)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -88,6 +89,25 @@ class TestHarnessAgentExecution:
         assert "not connected" in result["message"]
 
     @pytest.mark.asyncio
+    async def test_run_reconnects_harness_before_failing(self):
+        from agents.harness_agent.harness_agent import HarnessAgent
+
+        class RecoveringHM:
+            is_connected = False
+
+            async def start(self):
+                self.is_connected = True
+                return True
+
+        manager = RecoveringHM()
+        result = await HarnessAgent(harness_manager=manager).run(
+            {"action": "unknown", "platform": "x"}
+        )
+
+        assert manager.is_connected is True
+        assert result["message"] == "Unknown action: unknown"
+
+    @pytest.mark.asyncio
     async def test_run_unsupported_platform(self):
         from agents.harness_agent.harness_agent import HarnessAgent
 
@@ -159,17 +179,57 @@ class TestHarnessSocialHandler:
 class TestBrowserHarnessManager:
     """Test BrowserHarnessManager initialization."""
 
-    def test_manager_init(self):
-        from browser_cluster.manager.browser_harness_manager import BrowserHarnessManager
+    @pytest.fixture
+    def fake_browser_harness(self, monkeypatch):
+        from browser_cluster.manager import browser_harness_manager
+
+        helpers = types.SimpleNamespace(NAME="default")
+        ipc = types.SimpleNamespace(ping=lambda _name: False)
+        package = types.ModuleType("browser_harness")
+        admin = types.ModuleType("browser_harness.admin")
+        admin.ensure_daemon = lambda **_kwargs: None
+        package.admin = admin
+
+        monkeypatch.setitem(sys.modules, "browser_harness", package)
+        monkeypatch.setitem(sys.modules, "browser_harness.admin", admin)
+        monkeypatch.setattr(browser_harness_manager, "BH_AVAILABLE", True)
+        monkeypatch.setattr(browser_harness_manager, "bh", helpers, raising=False)
+        monkeypatch.setattr(browser_harness_manager, "ipc", ipc, raising=False)
+        return browser_harness_manager, admin
+
+    def test_manager_init(self, fake_browser_harness):
+        browser_harness_manager, _admin = fake_browser_harness
+        BrowserHarnessManager = browser_harness_manager.BrowserHarnessManager
         manager = BrowserHarnessManager(name="test")
         assert manager.name == "test"
         assert not manager.is_connected
+        assert browser_harness_manager.bh.NAME == "test"
 
     @pytest.mark.asyncio
-    async def test_manager_start_without_daemon(self):
-        from browser_cluster.manager.browser_harness_manager import BrowserHarnessManager
+    async def test_manager_start_without_daemon(
+        self, monkeypatch, fake_browser_harness
+    ):
+        browser_harness_manager, admin = fake_browser_harness
+
+        monkeypatch.setattr(browser_harness_manager.ipc, "ping", lambda _name: False)
+        monkeypatch.setattr(
+            admin,
+            "ensure_daemon",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("daemon unavailable")),
+        )
+
+        BrowserHarnessManager = browser_harness_manager.BrowserHarnessManager
         manager = BrowserHarnessManager(name="test_nonexistent")
-        # This should fail gracefully since no daemon is running
         result = await manager.start()
-        # Should return False since browser-harness daemon isn't running
-        assert result is False or manager.is_connected is False
+        assert result is False
+        assert manager.is_connected is False
+
+    @pytest.mark.asyncio
+    async def test_manager_start_without_package(self, monkeypatch):
+        from browser_cluster.manager import browser_harness_manager
+
+        monkeypatch.setattr(browser_harness_manager, "BH_AVAILABLE", False)
+        manager = browser_harness_manager.BrowserHarnessManager(name="test_missing")
+
+        assert await manager.start() is False
+        assert manager.is_connected is False

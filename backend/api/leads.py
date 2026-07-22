@@ -4,6 +4,7 @@ from typing import Any, Optional, List
 from datetime import datetime
 import json
 import logging
+from backend.email_utils import sanitize_lead_email
 from .auth import get_db_pool, get_current_user, UserResponse
 
 logger = logging.getLogger(__name__)
@@ -70,11 +71,36 @@ class MarketingMessageResponse(BaseModel):
     cta: str
     sequence_step: int
     status: str
+    personalization_evidence: List[str] = Field(default_factory=list)
+    quality_score: int = 0
+    risk_flags: List[str] = Field(default_factory=list)
+    generation_provider: str = "local"
+    generation_model: str = ""
+    approved_at: Optional[datetime] = None
+    scheduled_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
+    provider: Optional[str] = None
+    attempts: int = 0
+    last_error: Optional[str] = None
+    delivery_task_id: Optional[int] = None
+    follow_up_sequence_id: Optional[int] = None
+    template_version_id: Optional[int] = None
+    ab_experiment_id: Optional[int] = None
+    ab_variant_id: Optional[int] = None
+    estimated_cost_usd: float = 0
     created_at: datetime
 
 
 class LeadDetailResponse(LeadResponse):
     marketing_messages: List[MarketingMessageResponse] = Field(default_factory=list)
+
+
+def _to_marketing_message(row) -> MarketingMessageResponse:
+    data = dict(row)
+    for field in ("personalization_evidence", "risk_flags"):
+        if isinstance(data.get(field), str):
+            data[field] = json.loads(data[field])
+    return MarketingMessageResponse(**data)
 
 
 def _to_lead_response(row) -> LeadResponse:
@@ -86,7 +112,7 @@ def _to_lead_response(row) -> LeadResponse:
         platform=row['platform'],
         username=row['username'],
         profile_url=row['profile_url'],
-        email=row['email'],
+        email=sanitize_lead_email(row['email']),
         followers=row['followers'],
         tags=row['tags'] or [],
         status=row['status'] or 'new',
@@ -100,7 +126,7 @@ def _to_lead_response(row) -> LeadResponse:
 @router.get("/", response_model=LeadListResponse)
 async def get_leads(
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=200),
     status_filter: Optional[str] = Query(None, alias="status"),
     platform: Optional[str] = None,
     search: Optional[str] = Query(None, max_length=255),
@@ -173,7 +199,17 @@ async def get_leads(
                 SELECT id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at
                 FROM leads
                 {where_clause}
-                ORDER BY created_at DESC
+                ORDER BY
+                    CASE
+                        WHEN metadata->>'asset_source' = 'keyword_company_search'
+                             OR 'company_asset' = ANY(tags) THEN 0
+                        WHEN email IS NOT NULL
+                             OR metadata ? 'website'
+                             OR metadata ? 'linkedin_url' THEN 1
+                        ELSE 2
+                    END ASC,
+                    created_at DESC,
+                    id DESC
                 LIMIT ${param_idx} OFFSET ${param_idx + 1}
             """
             params.extend([page_size, offset])
@@ -214,7 +250,14 @@ async def get_lead(
             if not row:
                 raise HTTPException(status_code=404, detail="Lead not found")
             messages = await conn.fetch(
-                """SELECT id, channel, subject, body, cta, sequence_step, status, created_at
+                """SELECT id, channel, COALESCE(subject, '') AS subject, body,
+                          COALESCE(cta, '') AS cta, sequence_step, status,
+                          personalization_evidence, quality_score, risk_flags,
+                          generation_provider, generation_model, approved_at,
+                          scheduled_at, sent_at, provider, attempts, last_error,
+                          delivery_task_id, follow_up_sequence_id,
+                          template_version_id, ab_experiment_id, ab_variant_id,
+                          estimated_cost_usd, created_at
                    FROM marketing_messages
                    WHERE lead_id = $1 AND user_id = $2
                    ORDER BY created_at DESC, id DESC""",
@@ -222,7 +265,7 @@ async def get_lead(
             )
             return LeadDetailResponse(
                 **_to_lead_response(row).model_dump(),
-                marketing_messages=[MarketingMessageResponse(**dict(message)) for message in messages]
+                marketing_messages=[_to_marketing_message(message) for message in messages]
             )
         except HTTPException:
             raise
@@ -247,7 +290,7 @@ async def create_lead(
                 """INSERT INTO leads (platform, username, profile_url, email, followers, tags, status, user_id)
                    VALUES ($1, $2, $3, $4, $5, $6, 'new', $7)
                    RETURNING id, platform, username, profile_url, email, followers, tags, status, metadata, quality_score, user_id, created_at""",
-                lead.platform, lead.username, lead.profile_url, lead.email,
+                lead.platform, lead.username, lead.profile_url, sanitize_lead_email(lead.email),
                 lead.followers, lead.tags, current_user.id
             )
             return _to_lead_response(row)
@@ -295,7 +338,7 @@ async def update_lead(
 
             if update.email is not None:
                 updates.append(f"email = ${param_idx}")
-                params.append(update.email)
+                params.append(sanitize_lead_email(update.email))
                 param_idx += 1
 
             if update.followers is not None:

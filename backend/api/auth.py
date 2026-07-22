@@ -21,7 +21,8 @@ if not SECRET_KEY:
     SECRET_KEY = hashlib.sha256(b"openclaw-local-dev-key").hexdigest()
 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "30"))
 
 # Valid roles for user registration
 VALID_ROLES = {"user", "moderator"}
@@ -46,7 +47,9 @@ class UserResponse(BaseModel):
 
 class Token(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str = "bearer"
+    expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
 
 class TokenData(BaseModel):
@@ -56,6 +59,10 @@ class TokenData(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str = Field(..., min_length=20)
 
 
 def hash_password(password: str) -> str:
@@ -74,7 +81,19 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode = data.copy()
     from datetime import timezone
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "token_type": "access"})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a long-lived token used only to obtain a new token pair."""
+    from datetime import timezone
+
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (
+        expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    )
+    to_encode.update({"exp": expire, "token_type": "refresh"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -82,6 +101,8 @@ def decode_token(token: str) -> TokenData:
     """Decode and validate a JWT token."""
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("token_type", "access") != "access":
+            raise HTTPException(status_code=401, detail="Invalid access token")
         user_id_str = payload.get("sub")
         if user_id_str is None:
             raise HTTPException(status_code=401, detail="Invalid token")
@@ -90,6 +111,22 @@ def decode_token(token: str) -> TokenData:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+
+def decode_refresh_token(token: str) -> TokenData:
+    """Decode a refresh token without accepting access tokens."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("token_type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        user_id_str = payload.get("sub")
+        if user_id_str is None:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        return TokenData(user_id=int(user_id_str))
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh token has expired")
+    except jwt.JWTError:
+        raise HTTPException(status_code=401, detail="Could not validate refresh token")
 
 
 async def get_db_pool():
@@ -172,8 +209,11 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        access_token = create_access_token(data={"sub": str(row['id']), "email": row['email']})
-        return Token(access_token=access_token)
+        token_data = {"sub": str(row['id']), "email": row['email']}
+        return Token(
+            access_token=create_access_token(data=token_data),
+            refresh_token=create_refresh_token(data=token_data),
+        )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -183,10 +223,22 @@ async def get_me(current_user: UserResponse = Depends(get_current_user)):
 
 
 @router.post("/refresh", response_model=Token)
-async def refresh_token(current_user: UserResponse = Depends(get_current_user)):
-    """Refresh the access token."""
-    access_token = create_access_token(data={"sub": str(current_user.id), "email": current_user.email})
-    return Token(access_token=access_token)
+async def refresh_token(request: RefreshTokenRequest):
+    """Rotate a valid refresh token into a fresh access/refresh token pair."""
+    token_data = decode_refresh_token(request.refresh_token)
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, email FROM users WHERE id = $1",
+            token_data.user_id,
+        )
+    if not row:
+        raise HTTPException(status_code=401, detail="User not found")
+    claims = {"sub": str(row["id"]), "email": row["email"]}
+    return Token(
+        access_token=create_access_token(data=claims),
+        refresh_token=create_refresh_token(data=claims),
+    )
 
 
 @router.post("/logout")

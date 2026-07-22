@@ -12,7 +12,13 @@ def test_pipeline_request_uses_owned_lead_ids():
 
 
 def test_local_fallback_creates_editable_outreach_drafts():
-    lead = {"username": "demo", "platform": "x", "followers": 1200, "tags": ["fitness"]}
+    lead = {
+        "username": "Demo Lighting Contractor",
+        "platform": "linkedin",
+        "email": "sales@demo-lighting.example",
+        "followers": 1200,
+        "tags": ["lighting contractor", "project procurement"],
+    }
     research = _lead_fallback_research(lead)
     messages = _fallback_messages(lead, research, "en")
     assert research["quality_score"] > 0

@@ -26,6 +26,7 @@ import traceback
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from agents.base_agent import BaseAgent
+from agents.outreach_standards import CORE_ADVANTAGE, PRODUCT_LINE
 
 
 @dataclass
@@ -68,17 +69,18 @@ class EmailAgent(BaseAgent):
         browser_manager=None,
         db=None,
         smtp_host: str = None,
-        smtp_port: int = 587,
+        smtp_port: int = None,
         smtp_user: str = None,
         smtp_password: str = None,
         from_email: str = None,
-        from_name: str = "OpenClaw"
+        from_name: str = None
     ):
         super().__init__(name, browser_manager, db)
 
         # SMTP 配置
         self.smtp_host = smtp_host or os.getenv("SMTP_HOST", "smtp.gmail.com")
         self.smtp_port = smtp_port or int(os.getenv("SMTP_PORT", "587"))
+        self.smtp_use_ssl = os.getenv("SMTP_USE_SSL", "").strip().lower() in {"1", "true", "yes", "on"}
         self.smtp_user = smtp_user or os.getenv("SMTP_USER", "")
         self.smtp_password = smtp_password or os.getenv("SMTP_PASSWORD", "")
         self.from_email = from_email or os.getenv("FROM_EMAIL", self.smtp_user)
@@ -91,6 +93,47 @@ class EmailAgent(BaseAgent):
         self.templates = self._load_default_templates()
 
     def _load_default_templates(self) -> Dict[str, Dict]:
+        plain_style = """
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; color: #111827; line-height: 1.55;">
+  <p>{customer_signal}</p>
+  <p>We focus on {product_line}; the core advantage is {core_advantage}.</p>
+  <p>Before discussing price, I would check whether the product spec, quantity, and project timing fit your current procurement plan.</p>
+  <p>Do you want to check lead time or available stock first?</p>
+  <p>{sender_name}</p>
+</body>
+</html>
+        """
+        return {
+            "cold_outreach": {
+                "subject": "{customer_signal} - lead time or stock",
+                "body_html": plain_style,
+                "variables": ["customer_signal", "product_line", "core_advantage", "sender_name"],
+                "defaults": {"customer_signal": "I saw your current project requirements.", "product_line": PRODUCT_LINE, "core_advantage": CORE_ADVANTAGE},
+            },
+            "follow_up": {
+                "subject": "Follow-up: {customer_signal}",
+                "body_html": """
+<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; color: #111827; line-height: 1.55;">
+  <p>{customer_signal}</p>
+  <p>Following up once on the product spec, quantity, and timing fit.</p>
+  <p>Should I check lead time or available stock for this project?</p>
+  <p>{sender_name}</p>
+</body>
+</html>
+                """,
+                "variables": ["customer_signal", "sender_name"],
+            },
+            "meeting_request": {
+                "subject": "{customer_signal} - project timing",
+                "body_html": plain_style,
+                "variables": ["customer_signal", "product_line", "core_advantage", "sender_name"],
+                "defaults": {"customer_signal": "I saw your current project requirements.", "product_line": PRODUCT_LINE, "core_advantage": CORE_ADVANTAGE},
+            },
+        }
         """加载默认邮件模板 - 现代化专业设计"""
         return {
             "cold_outreach": {
@@ -337,7 +380,7 @@ class EmailAgent(BaseAgent):
 
             for email_data in batch:
                 # 合并模板变量
-                vars_combined = {**template_vars, **email_data.get("vars", {})}
+                vars_combined = {**template.get("defaults", {}), **template_vars, **email_data.get("vars", {})}
 
                 # 渲染模板
                 subject = self._render_template(template["subject"], vars_combined)
@@ -412,9 +455,12 @@ class EmailAgent(BaseAgent):
             mime_msg.attach(html_part)
 
             # 发送
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+            smtp_class = smtplib.SMTP_SSL if self.smtp_use_ssl else smtplib.SMTP
+            with smtp_class(self.smtp_host, self.smtp_port) as server:
                 server.ehlo()
-                server.starttls()
+                if not self.smtp_use_ssl:
+                    server.starttls()
+                    server.ehlo()
                 server.login(self.smtp_user, self.smtp_password)
                 server.sendmail(self.from_email, msg.to_email, mime_msg.as_string())
 
@@ -459,7 +505,7 @@ class EmailAgent(BaseAgent):
         """发送单封邮件的便捷方法"""
         if template:
             template_data = self.templates.get(template, self.templates["cold_outreach"])
-            vars_combined = template_vars or {}
+            vars_combined = {**template_data.get("defaults", {}), **(template_vars or {})}
             vars_combined["name"] = to_name
             subject = self._render_template(template_data["subject"], vars_combined)
             body_html = self._render_template(template_data["body_html"], vars_combined)

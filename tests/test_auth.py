@@ -15,7 +15,9 @@ from backend.api.auth import (
     hash_password,
     verify_password,
     create_access_token,
+    create_refresh_token,
     decode_token,
+    decode_refresh_token,
     UserCreate,
 )
 
@@ -81,6 +83,17 @@ class TestJWTTokens:
         with pytest.raises(HTTPException) as exc_info:
             decode_token("invalid.token.here")
         assert exc_info.value.status_code == 401
+
+    def test_refresh_token_is_distinct_from_access_token(self):
+        refresh_token = create_refresh_token({"sub": "123", "email": "test@example.com"})
+        assert decode_refresh_token(refresh_token).user_id == 123
+        with pytest.raises(HTTPException):
+            decode_token(refresh_token)
+
+    def test_access_token_cannot_be_used_as_refresh_token(self):
+        access_token = create_access_token({"sub": "123", "email": "test@example.com"})
+        with pytest.raises(HTTPException):
+            decode_refresh_token(access_token)
 
 
 class TestUserCreateModel:

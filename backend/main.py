@@ -29,7 +29,22 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
-from api import auth, agents, tasks, leads, products, analytics, outreach, system
+from api import (
+    acquisition_tasks,
+    analytics,
+    agents,
+    auth,
+    automations,
+    chat,
+    conversations,
+    leads,
+    optimization,
+    outreach,
+    products,
+    system,
+    tasks,
+    webhooks,
+)
 from middleware import GlobalResponseMiddleware, http_exception_handler, validation_exception_handler, generic_exception_handler
 
 readiness = {
@@ -60,15 +75,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Browser pool initialization failed: {e}")
 
-    try:
-        from scheduler.task_queue import init_task_queue
-        await init_task_queue()
-        readiness["task_queue"] = True
-        logger.info("Task queue initialized")
-    except Exception as e:
-        logger.error(f"Task queue initialization failed: {e}")
-
-    # Initialize browser-harness (optional, non-fatal)
+    # Initialize browser-harness before recovering queued browser delivery tasks.
     try:
         from browser_cluster.manager.browser_harness_manager import init_harness_manager
         harness_ok = await init_harness_manager()
@@ -79,9 +86,65 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.info(f"Browser harness not available: {e}")
 
+    try:
+        from scheduler.task_queue import init_task_queue
+        await init_task_queue()
+        readiness["task_queue"] = True
+        logger.info("Task queue initialized")
+    except Exception as e:
+        logger.error(f"Task queue initialization failed: {e}")
+
+    try:
+        from automation.engine import automation_job_worker
+
+        await automation_job_worker.start()
+        logger.info("Automation job worker initialized")
+    except Exception as e:
+        logger.error(f"Automation job worker initialization failed: {e}")
+
+    try:
+        from automation.delivery import outbound_delivery_worker
+
+        await outbound_delivery_worker.start()
+        logger.info("Outbound delivery worker initialized")
+    except Exception as e:
+        logger.error(f"Outbound delivery worker initialization failed: {e}")
+
+    try:
+        from agents.chat_agent.follow_up import follow_up_worker
+
+        await follow_up_worker.start()
+        logger.info("Follow-up worker initialized")
+    except Exception as e:
+        logger.error(f"Follow-up worker initialization failed: {e}")
+
+    try:
+        from acquisition.runner import acquisition_task_worker
+
+        await acquisition_task_worker.start()
+        logger.info("Acquisition task worker initialized")
+    except Exception as e:
+        logger.error(f"Acquisition task worker initialization failed: {e}")
+
     yield
 
     # Shutdown
+    try:
+        from acquisition.runner import acquisition_task_worker
+
+        await acquisition_task_worker.stop()
+        logger.info("Acquisition task worker closed")
+    except Exception as e:
+        logger.error(f"Acquisition task worker cleanup failed: {e}")
+
+    try:
+        from agents.chat_agent.follow_up import follow_up_worker
+
+        await follow_up_worker.stop()
+        logger.info("Follow-up worker closed")
+    except Exception as e:
+        logger.error(f"Follow-up worker cleanup failed: {e}")
+
     from db import close_db_pool
     try:
         await close_db_pool()
@@ -109,6 +172,22 @@ async def lifespan(app: FastAPI):
         logger.info("Task queue closed")
     except Exception as e:
         logger.error(f"Task queue cleanup failed: {e}")
+
+    try:
+        from automation.engine import automation_job_worker
+
+        await automation_job_worker.stop()
+        logger.info("Automation job worker closed")
+    except Exception as e:
+        logger.error(f"Automation job worker cleanup failed: {e}")
+
+    try:
+        from automation.delivery import outbound_delivery_worker
+
+        await outbound_delivery_worker.stop()
+        logger.info("Outbound delivery worker closed")
+    except Exception as e:
+        logger.error(f"Outbound delivery worker cleanup failed: {e}")
 
     try:
         from scheduler.task_queue import close_redis_client
@@ -154,12 +233,18 @@ app.add_exception_handler(Exception, generic_exception_handler)
 # Include routers
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
+app.include_router(acquisition_tasks.router, prefix="/api/acquisition-tasks", tags=["acquisition-tasks"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(leads.router, prefix="/api/leads", tags=["leads"])
 app.include_router(products.router, prefix="/api/products", tags=["products"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["analytics"])
+app.include_router(optimization.router, prefix="/api/optimization", tags=["optimization"])
 app.include_router(outreach.router, prefix="/api/outreach", tags=["outreach"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(automations.router, prefix="/api/automations", tags=["automations"])
+app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"])
+app.include_router(webhooks.router, prefix="/api/webhooks", tags=["webhooks"])
 
 
 @app.get("/")
